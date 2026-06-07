@@ -4,3 +4,6 @@
 !/testcase/.gitkeep
 
 *:Zone.Identifier
+parsetab.py
+__pycache__/
+*.pyc
