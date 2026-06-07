@@ -1,0 +1,6 @@
+/runs/*
+!/runs/.gitkeep
+/testcase/*
+!/testcase/.gitkeep
+
+*:Zone.Identifier

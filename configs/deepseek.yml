@@ -1,0 +1,14 @@
+# DeepSeek (OpenAI-compatible API)
+provider: openai
+base_url: https://api.deepseek.com/v1
+model: deepseek-chat
+# 推荐用环境变量传 key,不要写到文件里(交给队友时安全)
+# 在 shell 里跑: export OPENAI_API_KEY=sk-xxxxxxxxxxxx
+api_key: null
+
+parser: hybrid
+suite_root: /home/rufus/iccad_contest_a_v3
+log_dir: /home/rufus/iccad_contest_a_v3/contest_logs
+path_limit: 1000000
+yosys_timeout: 240
+temperature: 0
