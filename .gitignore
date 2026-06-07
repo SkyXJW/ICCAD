@@ -3,6 +3,9 @@
 /testcase/*
 !/testcase/.gitkeep
 
+TODO.md
+Prompt.txt
+A_20260212.pdf
 *:Zone.Identifier
 parsetab.py
 __pycache__/
