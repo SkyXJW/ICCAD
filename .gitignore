@@ -2,8 +2,8 @@
 !/runs/.gitkeep
 /testcase/*
 !/testcase/.gitkeep
-/packaging_v0/*
-!/packaging_v0/.gitkeep
+/packaging/*
+!/packaging/.gitkeep
 /build/*
 !/build/.gitkeep
 /dist/*
