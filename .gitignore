@@ -2,8 +2,15 @@
 !/runs/.gitkeep
 /testcase/*
 !/testcase/.gitkeep
+
 /packaging/*
 !/packaging/.gitkeep
+!/packaging/Dockerfile
+!/packaging/requirements-packaging.txt
+!/packaging/cada1078_alpha.spec
+!/packaging/build_pyinstaller.sh
+/packaging/out/*
+
 /build/*
 !/build/.gitkeep
 /dist/*

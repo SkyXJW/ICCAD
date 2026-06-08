@@ -1386,6 +1386,7 @@ class ContestAgent:
         self.case_name: Optional[str] = None
         self.response_id = 0
         self.log_path: Optional[Path] = None
+        self.current_testcase_dir: Optional[Path] = None
         self.action_history: List[Dict[str, Any]] = []
         self.last_auto_verify_seconds = 0.0
         self.last_auto_equivalence: Optional[Dict[str, Any]] = None
@@ -1417,10 +1418,39 @@ class ContestAgent:
         path = Path(_strip_quotes(output_path))
         if path.is_absolute():
             return path
+        if self.current_testcase_dir is not None:
+            return self.current_testcase_dir / path
         current = self._current_netlist_parent()
         if current is not None:
             return current / path
         return Path.cwd() / path
+
+    def _active_output_dir(self) -> Path:
+        return self.current_testcase_dir or self.config.log_dir
+
+    def _set_log_path_for_current_case(self) -> None:
+        if not self.case_name:
+            return
+        log_dir = self._active_output_dir()
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            new_log_path = log_dir / f"{self.case_name}.log"
+            if self.log_path is not None and self.log_path.exists() and self.log_path != new_log_path:
+                existing = self.log_path.read_text(errors="replace")
+                new_log_path.write_text(existing)
+                try:
+                    self.log_path.unlink()
+                except OSError:
+                    pass
+            elif not new_log_path.exists():
+                new_log_path.write_text("")
+            self.log_path = new_log_path
+        except OSError:
+            self.config.log_dir = Path.cwd()
+            self.current_testcase_dir = None
+            fallback = self.config.log_dir / f"{self.case_name}.log"
+            fallback.write_text("")
+            self.log_path = fallback
 
     def _current_netlist_parent(self) -> Optional[Path]:
         # eda_core keeps the design state internally. Import lazily to avoid
@@ -1552,24 +1582,18 @@ class ContestAgent:
             case_name = str(args["case_name"])
             self.case_name = case_name
             self.response_id = 0
+            self.current_testcase_dir = None
             self.action_history = []
-            try:
-                self.config.log_dir.mkdir(parents=True, exist_ok=True)
-                self.log_path = self.config.log_dir / f"{case_name}.log"
-                self.log_path.write_text("")
-            except OSError:
-                # If config points at an unavailable path, keep the contest process alive
-                # and log in the current working directory instead.
-                self.config.log_dir = Path.cwd()
-                self.log_path = self.config.log_dir / f"{case_name}.log"
-                self.log_path.write_text("")
+            self._set_log_path_for_current_case()
             return {"ok": True, "tool": tool, "case_name": case_name, "log_path": str(self.log_path)}
 
         if tool == "design_load":
             netlist = self._resolve_netlist_path(str(args["file_name"]), str(args["directory"]))
+            self.current_testcase_dir = netlist.parent
+            self._set_log_path_for_current_case()
             miter_dir = self.config.miter_dir
             if miter_dir is None and self.case_name:
-                miter_dir = self.config.log_dir / "yosys_miters" / self.case_name
+                miter_dir = self._active_output_dir() / "yosys_miters" / self.case_name
             return design_load(
                 netlist,
                 design_id="current",

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.git/
+build/
+dist/
+runs/
+submission/
+testcase/
+packaging/out/
+Prompt.txt
+A_20260212.pdf
+*.Zone.Identifier

@@ -292,9 +292,6 @@ def _abc_for_cec() -> str:
         sibling = abc_path.parent.parent / "bin" / "yosys-abc"
         if sibling.exists():
             return str(sibling)
-    default_oss = Path("/home/zzj/tools/oss-cad-suite/bin/yosys-abc")
-    if default_oss.exists():
-        return str(default_oss)
     return ABC_BIN
 
 

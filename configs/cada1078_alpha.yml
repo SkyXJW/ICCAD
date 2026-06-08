@@ -1,0 +1,24 @@
+# Contest-safe config for cada1078_alpha.
+# Do not set suite_root/log_dir here: suite_root defaults to /app for mounted inputs.
+# After design_load, logs and relative design_write outputs are written beside the loaded design file.
+provider: openai
+model: gpt-4o-mini
+api_key: null
+parser: hybrid
+path_limit: 1000000
+yosys_timeout: 240
+temperature: 0
+llm_review: false
+auto_verify_transforms: false
+
+generation:
+  temperature: 0.2
+  max_output_tokens: 4096
+
+openai:
+  api_key: null
+  model: gpt-4o-mini
+
+anthropic:
+  api_key: null
+  model: claude-haiku-4-5
