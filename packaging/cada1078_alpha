@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+export PATH="$DIR/bin:$PATH"
+
+if [ -f "$DIR/abc_resources/my.genlib" ]; then
+  export GENLIB_PATH="$DIR/abc_resources/my.genlib"
+fi
+
+if [ -f "$DIR/abc_resources/abc.rc" ]; then
+  export ABC_RC_PATH="$DIR/abc_resources/abc.rc"
+fi
+
+if [ -x "$DIR/bin/yosys-abc" ]; then
+  export ABC_CEC_BIN="$DIR/bin/yosys-abc"
+fi
+
+if [ -x "$DIR/bin/abc" ]; then
+  export ABC_BIN="$DIR/bin/abc"
+fi
+
+exec "$DIR/app/cada1078_alpha_dist/cada1078_alpha_bin" "$@"

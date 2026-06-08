@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,10 +52,18 @@ from ir import NetlistIR, Cell
 ABC_BIN = os.environ.get("ABC_BIN", "abc")
 ABC_CEC_BIN = os.environ.get("ABC_CEC_BIN", "")
 
+
+def _resource_root() -> Path:
+    """Return the project/resource root in source and PyInstaller-frozen runs."""
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        return Path(frozen_root)
+    return Path(__file__).resolve().parent.parent
+
+
 # Default to the project's bundled ABC resources so the repo is self-contained.
 # Users can still override via env vars if they want a custom genlib/abc.rc.
-_HERE = Path(__file__).resolve().parent
-_BUNDLED = _HERE.parent / "abc_resources"
+_BUNDLED = _resource_root() / "abc_resources"
 _DEFAULT_GENLIB = _BUNDLED / "my.genlib"
 _DEFAULT_ABC_RC = _BUNDLED / "abc.rc"
 

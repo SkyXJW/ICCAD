@@ -271,11 +271,19 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
         return json.loads(match.group(0))
 
 
+def _resource_root() -> Path:
+    """Return the project/resource root in source and PyInstaller-frozen runs."""
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        return Path(frozen_root)
+    return Path(__file__).resolve().parents[1]
+
+
 def _default_tool_spec_path(suite_root: Path) -> Path:
     candidate = suite_root / "mcp_tools_spec.json"
     if candidate.exists():
         return candidate
-    return Path(__file__).resolve().parents[1] / "mcp_tools_spec.json"
+    return _resource_root() / "mcp_tools_spec.json"
 
 
 def load_tool_contract(suite_root: Path) -> Dict[str, Any]:

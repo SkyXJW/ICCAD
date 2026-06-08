@@ -1,0 +1,4 @@
+pyinstaller
+pyverilog
+networkx
+PyYAML
