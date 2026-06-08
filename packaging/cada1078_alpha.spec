@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files
+
 ROOT = Path.cwd()
 
 block_cipher = None
@@ -15,6 +17,7 @@ a = Analysis(
         (str(ROOT / "mcp_tools_spec.json"), "."),
         (str(ROOT / "abc_resources"), "abc_resources"),
         (str(ROOT / "configs" / "contest.yml"), "configs"),
+        *collect_data_files("pyverilog"),
     ],
     hiddenimports=[
         "yaml",

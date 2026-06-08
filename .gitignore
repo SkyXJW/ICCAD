@@ -2,6 +2,14 @@
 !/runs/.gitkeep
 /testcase/*
 !/testcase/.gitkeep
+/packaging/*
+!/packaging/.gitkeep
+/build/*
+!/build/.gitkeep
+/dist/*
+!/dist/.gitkeep
+/submission/*
+!/submission/.gitkeep
 
 TODO.md
 Prompt.txt

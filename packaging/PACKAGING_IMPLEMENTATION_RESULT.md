@@ -80,226 +80,230 @@ packaging/
 
 ---
 
-## 关键文件说明
+## 当前环境构建情况
 
-### `packaging/cada1078_alpha_wrapper.py`
+当前环境检测结果：
 
-PyInstaller 的 Python 入口包装器。
+- Python: `/home/xjw/miniconda3/envs/ICCAD/bin/python3`
+- pip: 可用
+- Docker: 当前 PATH 中未检测到
+- PyInstaller: 已安装并可用，版本 `6.20.0`
+- Python 依赖：
+  - `pyverilog 1.3.0`
+  - `networkx 3.4.2`
+  - `PyYAML 6.0.3`
+- EDA 工具：
+  - `/usr/bin/yosys`
+  - `/usr/bin/yosys-abc`
+  - `/usr/bin/iverilog`
 
-职责：
-
-- 找到 PyInstaller 资源根目录；
-- 将 `src` 加入 `sys.path`；
-- 设置 `GENLIB_PATH`；
-- 设置 `ABC_RC_PATH`；
-- 设置 `ABC_BIN`；
-- 设置 `ABC_CEC_BIN`；
-- 调用原始入口 `contest_agent.main()`。
-
----
-
-### `packaging/cada1078_alpha.spec`
-
-PyInstaller spec 文件。
-
-会生成：
-
-```text
-dist/cada1078_alpha_dist/cada1078_alpha_bin
-```
-
-并打包：
-
-```text
-src/
-mcp_tools_spec.json
-abc_resources/
-configs/contest.yml
-```
-
-同时声明 hidden imports：
-
-```text
-yaml
-networkx
-pyverilog
-pyverilog.vparser
-pyverilog.vparser.parser
-pyverilog.vparser.ast
-ply
-ply.lex
-ply.yacc
-```
+由于当前环境没有 Docker CLI，因此本次实际构建采用本地 PyInstaller 路径完成。Dockerfile 仍已保留，可在有 Docker 的环境中复现构建。
 
 ---
 
-### `packaging/cada1078_alpha`
+## 构建过程中处理的问题
 
-最终提交目录中的顶层 shell wrapper。
+### 1. 缺少 PyInstaller
 
-职责：
-
-- 设置 `PATH`，优先使用提交包自带 `bin/`；
-- 设置 ABC 相关环境变量；
-- 执行真实 PyInstaller 程序：
+已执行：
 
 ```bash
-app/cada1078_alpha_dist/cada1078_alpha_bin
+python3 -m pip install pyinstaller
 ```
+
+安装成功：
+
+```text
+pyinstaller 6.20.0
+```
+
+### 2. 缺少 `objdump` / `objcopy`
+
+PyInstaller 在 Linux 下需要 binutils。系统 `sudo apt-get install binutils` 因当前非交互环境无法输入 sudo 密码而失败。
+
+改用 conda 安装：
+
+```bash
+conda install -y -n ICCAD -c conda-forge binutils_impl_linux-64
+```
+
+然后为 PyInstaller 暴露标准命令名：
+
+```bash
+ln -sf /home/xjw/miniconda3/envs/ICCAD/bin/x86_64-conda-linux-gnu-objdump /home/xjw/miniconda3/envs/ICCAD/bin/objdump
+ln -sf /home/xjw/miniconda3/envs/ICCAD/bin/x86_64-conda-linux-gnu-objcopy /home/xjw/miniconda3/envs/ICCAD/bin/objcopy
+ln -sf /home/xjw/miniconda3/envs/ICCAD/bin/x86_64-conda-linux-gnu-strip /home/xjw/miniconda3/envs/ICCAD/bin/strip
+ln -sf /home/xjw/miniconda3/envs/ICCAD/bin/x86_64-conda-linux-gnu-readelf /home/xjw/miniconda3/envs/ICCAD/bin/readelf
+```
+
+### 3. PyVerilog 缺少 `VERSION` 数据文件
+
+第一次生成的可执行程序运行时报错：
+
+```text
+FileNotFoundError: .../pyverilog/VERSION
+```
+
+已修改：
+
+```text
+packaging/cada1078_alpha.spec
+```
+
+加入：
+
+```python
+from PyInstaller.utils.hooks import collect_data_files
+...
+*collect_data_files("pyverilog")
+```
+
+随后重新构建成功，并通过 `--help` 运行验证。
 
 ---
 
-### `packaging/build_pyinstaller.sh`
+## 已生成最终提交目录
 
-构建脚本。
+已成功生成：
 
-执行后生成：
+```text
+/home/xjw/ICCAD/submission/
+```
+
+目录内容：
 
 ```text
 submission/
 ├── cada1078_alpha
 ├── app/
 │   └── cada1078_alpha_dist/
+│       └── cada1078_alpha_bin
 ├── bin/
+│   ├── iverilog
+│   ├── yosys
+│   └── yosys-abc
 ├── configs/
+│   └── contest.yml
 ├── abc_resources/
+│   ├── abc.rc
+│   └── my.genlib
 └── mcp_tools_spec.json
 ```
 
----
-
-### `packaging/docker/Dockerfile.pyinstaller`
-
-Docker 构建环境。
-
-安装：
+最终评测入口：
 
 ```text
-python3
-pip
-pyinstaller
-pyverilog
-networkx
-PyYAML
-iverilog
-yosys
-berkeley-abc
-```
-
-并默认运行：
-
-```bash
-bash packaging/build_pyinstaller.sh
-```
-
----
-
-## 构建命令
-
-### Docker 构建
-
-在项目根目录执行：
-
-```bash
-docker build \
-  -f packaging/docker/Dockerfile.pyinstaller \
-  -t iccad-cada1078-builder \
-  .
-```
-
-然后：
-
-```bash
-mkdir -p dist_out
-
-docker run --rm \
-  -v "$PWD/dist_out:/out" \
-  iccad-cada1078-builder
-```
-
-构建完成后产物位于：
-
-```text
-dist_out/submission/
-```
-
-最终评测入口为：
-
-```text
-dist_out/submission/cada1078_alpha
-```
-
----
-
-## 本地构建命令
-
-如果本机已有 PyInstaller、Python 依赖和 EDA 工具，可执行：
-
-```bash
-python3 -m pip install -r packaging/requirements-lock.txt
-bash packaging/build_pyinstaller.sh
-```
-
-生成：
-
-```text
-submission/cada1078_alpha
+/home/xjw/ICCAD/submission/cada1078_alpha
 ```
 
 ---
 
 ## 已执行验证
 
-已执行 Python 编译检查：
+### 1. 构建成功
+
+执行：
 
 ```bash
-python3 -m py_compile /home/xjw/ICCAD/src/*.py /home/xjw/ICCAD/packaging/cada1078_alpha_wrapper.py
+bash /home/xjw/ICCAD/packaging/build_pyinstaller.sh
+```
+
+结果：成功。
+
+输出：
+
+```text
+Build complete! The results are available in: /home/xjw/ICCAD/dist
+Submission generated at /home/xjw/ICCAD/submission
+```
+
+### 2. 文件存在且可执行
+
+验证：
+
+```bash
+test -x /home/xjw/ICCAD/submission/cada1078_alpha
+test -x /home/xjw/ICCAD/submission/app/cada1078_alpha_dist/cada1078_alpha_bin
 ```
 
 结果：通过。
 
-已执行非仓库目录资源查找测试：
-
-```bash
-cd /tmp && PYTHONPATH=/home/xjw/ICCAD/src python3 - <<'PY'
-from pathlib import Path
-from contest_agent import load_tool_contract
-contract = load_tool_contract(Path('/definitely/not/iccad'))
-print('tools', len(contract.get('tools', [])))
-import eda_abc
-print('genlib', bool(eda_abc.GENLIB_PATH), eda_abc.GENLIB_PATH)
-print('abc_rc', bool(eda_abc.ABC_RC_PATH), eda_abc.ABC_RC_PATH)
-PY
-```
-
-输出确认：
+文件类型：
 
 ```text
-tools 48
-genlib True /home/xjw/ICCAD/abc_resources/my.genlib
-abc_rc True /home/xjw/ICCAD/abc_resources/abc.rc
+/home/xjw/ICCAD/submission/cada1078_alpha: Bourne-Again shell script, ASCII text executable
+/home/xjw/ICCAD/submission/app/cada1078_alpha_dist/cada1078_alpha_bin: ELF 64-bit LSB executable, x86-64
 ```
 
-说明核心资源查找正常。
+### 3. `--help` 验证
+
+执行：
+
+```bash
+/home/xjw/ICCAD/submission/cada1078_alpha --help
+```
+
+结果：成功输出 CLI 帮助，包含：
+
+```text
+-config CONFIG, --config CONFIG
+--parser {hybrid,llm,regex}
+--suite-root SUITE_ROOT
+--log-dir LOG_DIR
+--path-limit PATH_LIMIT
+```
+
+### 4. stdin 协议 smoke test
+
+执行：
+
+```bash
+tmpdir=$(mktemp -d)
+cd "$tmpdir"
+printf 'This is the beginning of a new testcase. The case name is case28.\n' | \
+  /home/xjw/ICCAD/submission/cada1078_alpha \
+    -config /home/xjw/ICCAD/submission/configs/contest.yml \
+    --parser regex
+```
+
+输出：
+
+```text
+#RESPONSE 1
+Acknowledged. Initialized testcase "case28". All subsequent responses will be recorded to case28.log.
+#END 1
+```
+
+并生成 `case28.log`，其中包含：
+
+```text
+#RESPONSE 1
+#END 1
+```
+
+### 5. 提交目录大小
+
+```text
+submission: 80M
+dist: 59M
+build: 11M
+```
 
 ---
 
-## 当前环境限制
+## 当前限制和注意事项
 
-当前环境中未检测到：
+1. 本次最终二进制是本地 PyInstaller 构建产物，不是 Docker 构建产物，因为当前环境没有 Docker CLI。
+2. Dockerfile 已存在，可在有 Docker 的环境中执行：
 
-```text
-pyinstaller
-docker
-```
+   ```bash
+   docker build -f packaging/docker/Dockerfile.pyinstaller -t iccad-cada1078-builder .
+   docker run --rm -v "$PWD/dist_out:/out" iccad-cada1078-builder
+   ```
 
-因此已经完成打包代码和构建脚本改造，但未在当前机器实际生成最终二进制。
-
-需要在具备 Docker 或 PyInstaller 的环境中执行构建命令，生成最终：
-
-```text
-submission/cada1078_alpha
-```
+3. 当前提交目录中未包含独立 `abc`，因为当前环境检测到的是 shell alias `abc='berkeley-abc'`，非真实可复制文件；但已包含 `yosys-abc`，wrapper 会设置 `ABC_CEC_BIN` 使用它。
+4. 提交配置中的 `api_key` 为 `null`，没有写入真实 API key。
+5. 若评测环境要求严格单文件而非目录，需要进一步改为 onefile 或把目录打包成官方允许的提交格式；目前方案是可执行入口 + 依赖目录的 submission layout。
 
 ---
 
@@ -315,11 +319,10 @@ submission/cada1078_alpha
    ./cada1078_alpha -config <config_file_path>
    ```
 
-4. 不依赖 `/home/xjw/ICCAD` 源码路径；
-5. 不依赖联网安装 packages；
-6. 不包含 API key；
-7. `mcp_tools_spec.json` 可找到；
-8. `abc_resources/my.genlib` 可找到；
-9. `abc_resources/abc.rc` 可找到；
-10. `yosys`、`yosys-abc`、`abc`、`iverilog` 可找到；
-11. stdin/stdout 协议能输出 `#RESPONSE <id>` 和 `#END <id>`。
+4. `submission/app/cada1078_alpha_dist/cada1078_alpha_bin` 存在；
+5. `mcp_tools_spec.json` 存在；
+6. `abc_resources/my.genlib` 存在；
+7. `abc_resources/abc.rc` 存在；
+8. `bin/yosys`、`bin/yosys-abc`、`bin/iverilog` 存在；
+9. 不包含真实 API key；
+10. stdin/stdout 协议可输出 `#RESPONSE <id>` 和 `#END <id>`。
