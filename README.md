@@ -125,6 +125,8 @@ Agent 从 stdin 读取 prompt，并输出：
 #END N
 ```
 
+若渲染后的回答内容超过 `answer_artifact_threshold`（默认 65536 字符，设为 0 或负数可关闭），Agent 会把完整回答写入单独的文本文件，并在上述响应块中只输出该文件的绝对路径说明。`design_load` 之后，该文件会与当前 testcase 的 `<case_name>.log` 一样写到已加载网表所在目录；在加载设计之前则写到 `log_dir`。
+
 ## 开发 replay
 
 当官方 testcase 存在时，可以运行：
@@ -141,7 +143,7 @@ PYTHONPATH=src python3 src/contest_agent.py \
 replay 会写入：
 
 - `runs/llm/timing.csv`
-- `runs/llm/answers.csv`
+- `runs/llm/answers.csv`（若回答被写入 sidecar，这里记录与 stdout/log 中一致的路径说明）
 - 每个 testcase 的 log 文件
 
 ## 开发自动验证配置

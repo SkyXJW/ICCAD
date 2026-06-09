@@ -150,6 +150,7 @@ class AgentConfig:
     miter_dir: Optional[Path] = None
     temperature: float = 0.0
     max_output_tokens: int = 4096
+    answer_artifact_threshold: int = 65_536
     llm_review: bool = False
     auto_verify_transforms: bool = False
 
@@ -241,6 +242,7 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
             default=_first_value(merged, "max_output_tokens", "max_tokens", default=4096),
         )
     )
+    answer_artifact_threshold = int(_first_value(merged, "answer_artifact_threshold", default=65_536))
 
     suite_root = Path(_first_value(merged, "suite_root", "project_root", default=Path.cwd()))
     log_dir = Path(_first_value(merged, "log_dir", "output_dir", default=Path.cwd()))
@@ -259,6 +261,7 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
         miter_dir=Path(miter_dir_value) if miter_dir_value else None,
         temperature=temperature,
         max_output_tokens=max_output_tokens,
+        answer_artifact_threshold=answer_artifact_threshold,
         llm_review=_as_bool(_first_value(merged, "llm_review", "llm_self_check", "llm_judge", default=False)),
         auto_verify_transforms=_as_bool(_first_value(merged, "auto_verify_transforms", default=False)),
     )
@@ -1460,6 +1463,31 @@ class ContestAgent:
     def _active_output_dir(self) -> Path:
         return self.current_testcase_dir or self.config.log_dir
 
+    def _answer_artifact_path(self, response_id: int) -> Path:
+        base = self.case_name if self.case_name else "response"
+        filename = f"{base}_response_{response_id:04d}_answer.txt" if self.case_name else f"response_{response_id:04d}_answer.txt"
+        return self._active_output_dir() / filename
+
+    def _maybe_spill_long_answer(self, answer: str, response_id: int) -> str:
+        threshold = self.config.answer_artifact_threshold
+        if threshold <= 0 or len(answer) <= threshold:
+            return answer
+
+        try:
+            out_dir = self._active_output_dir()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = self._answer_artifact_path(response_id)
+            path.write_text(answer, encoding="utf-8")
+            display_path = path.resolve()
+        except OSError as exc:
+            print(
+                f"[warning] failed to write long answer artifact for response {response_id}: {exc}",
+                file=sys.stderr,
+            )
+            return answer
+
+        return f"The answer content is too long for inline output. Full answer written to: {display_path}"
+
     def _set_log_path_for_current_case(self) -> None:
         if not self.case_name:
             return
@@ -1603,8 +1631,7 @@ class ContestAgent:
         result = self._maybe_auto_verify_transform(call, result)
         self._remember_action(call, result)
         answer = render_answer(call, result, request)
-        self.emit_response(answer)
-        return answer
+        return self.emit_response(answer)
 
     def execute(self, call: ToolCall) -> Dict[str, Any]:
         args = dict(call.arguments)
@@ -1852,14 +1879,16 @@ class ContestAgent:
 
         raise ValueError(f"unsupported tool: {tool}")
 
-    def emit_response(self, answer: str) -> None:
+    def emit_response(self, answer: str) -> str:
         self.response_id += 1
-        payload = f"#RESPONSE {self.response_id}\n{answer}\n#END {self.response_id}\n"
+        emitted_answer = self._maybe_spill_long_answer(answer, self.response_id)
+        payload = f"#RESPONSE {self.response_id}\n{emitted_answer}\n#END {self.response_id}\n"
         if not self.suppress_stdout:
             print(payload, end="", flush=True)
         if self.log_path is not None:
             with self.log_path.open("a") as log:
                 log.write(payload)
+        return emitted_answer
 
 
 def find_case_prompt(root: Path, case_num: int) -> Path:
@@ -1994,6 +2023,11 @@ def main() -> None:
     parser.add_argument("--suite-root", type=Path, help="project root used to resolve testcase paths")
     parser.add_argument("--log-dir", type=Path, help="directory for <case>.log files")
     parser.add_argument("--path-limit", type=int, help="path enumeration limit")
+    parser.add_argument(
+        "--answer-artifact-threshold",
+        type=int,
+        help="maximum inline answer characters before writing the full answer to a sidecar file; <=0 disables",
+    )
     parser.add_argument("--replay-suite", action="store_true", help="development helper: replay prompt.txt files")
     parser.add_argument("--start", type=int, default=1)
     parser.add_argument("--end", type=int, default=20)
@@ -2009,6 +2043,8 @@ def main() -> None:
         config.log_dir = args.log_dir
     if args.path_limit is not None:
         config.path_limit = args.path_limit
+    if args.answer_artifact_threshold is not None:
+        config.answer_artifact_threshold = args.answer_artifact_threshold
 
     if args.replay_suite:
         replay_suite(config, args.start, args.end, suppress_stdout=args.suppress_stdout)
