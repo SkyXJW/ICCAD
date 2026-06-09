@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .git/
-./claude/
+.claude/
 build/
 dist/
 runs/
