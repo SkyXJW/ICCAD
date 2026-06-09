@@ -700,6 +700,18 @@ class RequestParser:
         if "how many redundant gates were removed" in lower or re.search(r"How many gates were merged as structural duplicates\?", text, flags=re.I):
             return repaired("analysis_last_transform_stats", {"metric": "merged_gates", "tool": "optimization_merge_equivalent_or_duplicate_gates"})
 
+        if call.tool == "analysis_max_logic_depth":
+            full_design_depth = (
+                "maximum combinational logic depth in the design" in lower
+                or "maximum combinational depth in the design" in lower
+                or "maximum logic depth" in lower and ("design" in lower or "netlist" in lower)
+                or "longest combinational path depth" in lower and ("design" in lower or "netlist" in lower)
+                or "critical path depth" in lower and ("design" in lower or "netlist" in lower)
+            )
+            cone_depth = "cone" in lower or " from " in lower and " to " in lower
+            if full_design_depth and not cone_depth:
+                return repaired("analysis_max_logic_depth", {})
+
         match = re.search(r"Replace all 2-input OR gates in the cone of (\S+) with equivalent logic (?:built only from|using only) NAND and NOT", text, flags=re.I)
         if match:
             return repaired("transformation_replace_gate_library", {"scope": "cone", "target": _strip_quotes(match.group(1)), "from_gate": "or", "to_library": "nand_not"})

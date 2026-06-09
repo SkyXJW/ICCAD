@@ -345,26 +345,25 @@
     {
       "name": "analysis_max_logic_depth",
       "category": "analysis",
-      "description": "Compute maximum combinational logic depth.",
-      "when_to_use": "Use for maximum logic depth, longest combinational path depth, or critical path depth questions.",
+      "description": "Compute maximum combinational logic depth. Omit both source and target for full-design maximum depth; use target only for a specific fanin cone; use both source and target for source-to-target depth.",
+      "when_to_use": "Use for maximum logic depth, longest combinational path depth, or critical path depth questions. For full-design/current-design questions, pass no source or target; do not pass target='current', target='design', or target='netlist'.",
       "parameters": {
         "type": "object",
         "properties": {
           "target": {
-            "type": "string"
+            "type": "string",
+            "description": "Optional output/net/signal for fanin-cone depth. Omit for full-design maximum depth. Do not use current/design/netlist as a placeholder target."
           },
           "source": {
             "type": "string",
-            "description": "Optional. If omitted, computes max depth of the target fanin cone."
+            "description": "Optional source net/signal. Use only together with target for source-to-target depth; omit with target for target fanin-cone depth."
           },
           "design_id": {
             "type": "string",
             "default": "current"
           }
         },
-        "required": [
-          "target"
-        ]
+        "required": []
       },
       "returns": {
         "source": "string|null",
