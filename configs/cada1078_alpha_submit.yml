@@ -10,7 +10,7 @@ generation:
 
 openai:
   api_key: null
-  model: deepseek-v4-pro
+  model: gpt-4o-mini
 
 anthropic:
   api_key: null
