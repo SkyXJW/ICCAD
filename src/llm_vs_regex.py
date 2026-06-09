@@ -110,7 +110,8 @@ def main():
     cfg_r = dataclasses.replace(base, parser="regex")
     cfg_l = dataclasses.replace(base, parser="llm")
     if not cfg_l.api_key:
-        print("✗ 没有检测到 API key。请先 export OPENAI_API_KEY=sk-...")
+        env_name = "ANTHROPIC_API_KEY" if cfg_l.provider == "anthropic" else "OPENAI_API_KEY"
+        print(f"✗ 没有检测到 {cfg_l.provider} API key。请先 export {env_name}=...")
         return 2
     pr = RequestParser(cfg_r)
     pl = RequestParser(cfg_l)

@@ -25,3 +25,4 @@ A_20260212.pdf
 parsetab.py
 __pycache__/
 *.pyc
+*.csv

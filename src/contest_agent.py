@@ -149,6 +149,7 @@ class AgentConfig:
     yosys_timeout: int = 240
     miter_dir: Optional[Path] = None
     temperature: float = 0.0
+    max_output_tokens: int = 4096
     llm_review: bool = False
     auto_verify_transforms: bool = False
 
@@ -202,18 +203,44 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
     llm = raw.get("llm") if isinstance(raw.get("llm"), dict) else {}
     merged = {**raw, **llm}
 
-    provider = str(_first_value(merged, "provider", "llm_provider", default="openai")).lower()
-    model = str(
+    provider = str(_first_value(merged, "provider", "llm_provider", default="openai")).strip().lower()
+    generation = merged.get("generation") if isinstance(merged.get("generation"), dict) else {}
+    provider_block = merged.get(provider) if isinstance(merged.get(provider), dict) else {}
+
+    default_model = "gpt-4o-mini" if provider == "openai" else "claude-haiku-4-5"
+    model_value = _first_value(provider_block, "model", "model_name", default=None)
+    if model_value is None:
+        model_value = _first_value(merged, "model", "model_name", default=default_model)
+    model = str(model_value)
+
+    api_key = _first_value(provider_block, "api_key", default=None)
+    if api_key is None:
+        provider_api_key = "anthropic_api_key" if provider == "anthropic" else "openai_api_key"
+        api_key = _first_value(merged, provider_api_key, default=None)
+    if api_key is None:
+        api_key = _first_value(merged, "api_key", default=None)
+    if api_key is None:
+        env_key = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+        api_key = os.environ.get(env_key)
+
+    base_url = _first_value(provider_block, "base_url", "api_base", default=None)
+    if base_url is None:
+        base_url = _first_value(merged, "base_url", "api_base", default=None)
+
+    temperature = float(
         _first_value(
-            merged,
-            "model",
-            "model_name",
-            default = "gpt-4o-mini" if provider == "openai" else "claude-4-5-haiku-latest",
+            generation,
+            "temperature",
+            default=_first_value(merged, "temperature", default=0.0),
         )
     )
-    api_key = _first_value(merged, "api_key", "openai_api_key", "anthropic_api_key")
-    if api_key is None:
-        api_key = os.environ.get("OPENAI_API_KEY") if provider == "openai" else os.environ.get("ANTHROPIC_API_KEY")
+    max_output_tokens = int(
+        _first_value(
+            generation,
+            "max_output_tokens",
+            default=_first_value(merged, "max_output_tokens", "max_tokens", default=4096),
+        )
+    )
 
     suite_root = Path(_first_value(merged, "suite_root", "project_root", default=Path.cwd()))
     log_dir = Path(_first_value(merged, "log_dir", "output_dir", default=Path.cwd()))
@@ -223,14 +250,15 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
         provider=provider,
         model=model,
         api_key=api_key,
-        base_url=_first_value(merged, "base_url", "api_base", default=None),
+        base_url=base_url,
         parser=str(_first_value(merged, "parser", default="hybrid")).lower(),
         suite_root=suite_root,
         log_dir=log_dir,
         path_limit=int(_first_value(merged, "path_limit", default=1_000_000)),
         yosys_timeout=int(_first_value(merged, "yosys_timeout", default=240)),
         miter_dir=Path(miter_dir_value) if miter_dir_value else None,
-        temperature=float(_first_value(merged, "temperature", default=0.0)),
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
         llm_review=_as_bool(_first_value(merged, "llm_review", "llm_self_check", "llm_judge", default=False)),
         auto_verify_transforms=_as_bool(_first_value(merged, "auto_verify_transforms", default=False)),
     )
@@ -745,6 +773,7 @@ class RequestParser:
                 {"role": "user", "content": user},
             ],
             "temperature": self.config.temperature,
+            "max_tokens": self.config.max_output_tokens,
             "response_format": {"type": "json_object"},
         }
         data = _json_post(
@@ -760,15 +789,18 @@ class RequestParser:
 
     def _call_anthropic(self, system: str, user: str) -> Dict[str, Any]:
         base_url = self.config.base_url or "https://api.anthropic.com/v1/messages"
+        url = base_url.rstrip("/")
+        if not url.endswith("/messages"):
+            url += "/messages"
         body = {
             "model": self.config.model,
-            "max_tokens": 512,
+            "max_tokens": self.config.max_output_tokens,
             "temperature": self.config.temperature,
             "system": system,
             "messages": [{"role": "user", "content": user}],
         }
         data = _json_post(
-            base_url,
+            url,
             {
                 "x-api-key": str(self.config.api_key),
                 "anthropic-version": "2023-06-01",

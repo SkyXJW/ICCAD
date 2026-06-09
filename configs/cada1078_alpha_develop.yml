@@ -1,0 +1,19 @@
+# 非正式配置，开发期间使用，允许更改参数配置用于调试
+# 按照赛事要求，每个测试用例的.log输出文件以及.v输出文件都会保存至测试用例自身所在目录下
+provider: openai
+
+generation:
+  temperature: 0.2
+  max_output_tokens: 4096
+
+openai:
+  api_key: null
+  model: gpt-4o-mini
+
+base_url: https://agent.evanora.top/v1
+
+parser: llm
+path_limit: 1000000
+yosys_timeout: 240
+llm_review: false
+auto_verify_transforms: false

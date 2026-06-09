@@ -1,8 +1,0 @@
-provider: openai
-model: gpt-4o-mini
-parser: llm
-path_limit: 1000000
-yosys_timeout: 240
-temperature: 0
-llm_review: true
-auto_verify_transforms: true
