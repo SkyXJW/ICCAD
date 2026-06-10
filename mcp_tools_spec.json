@@ -748,11 +748,16 @@
     {
       "name": "analysis_primary_io_summary",
       "category": "analysis",
-      "description": "analysis primary io summary",
-      "when_to_use": "analysis primary io summary",
+      "description": "Summarize primary inputs and primary outputs, optionally listing names with bit widths.",
+      "when_to_use": "Use for questions asking the number of primary inputs/outputs, or listing all primary inputs/outputs with bit widths. Set answer_style='inputs' when listing primary inputs with bit widths, answer_style='outputs' when listing primary outputs with bit widths, and answer_style='counts' for count-only questions.",
       "parameters": {
         "type": "object",
         "properties": {
+          "answer_style": {
+            "type": "string",
+            "enum": ["counts", "inputs", "outputs"],
+            "description": "Response style requested by the prompt. Use outputs for 'List all primary outputs ... with bit widths', inputs for primary inputs, counts for count-only summaries."
+          },
           "design_id": {
             "type": "string",
             "default": "current"

@@ -700,6 +700,14 @@ class RequestParser:
         if "how many redundant gates were removed" in lower or re.search(r"How many gates were merged as structural duplicates\?", text, flags=re.I):
             return repaired("analysis_last_transform_stats", {"metric": "merged_gates", "tool": "optimization_merge_equivalent_or_duplicate_gates"})
 
+        if call.tool == "analysis_primary_io_summary":
+            if "primary outputs" in lower and "bit widths" in lower:
+                return repaired("analysis_primary_io_summary", {"answer_style": "outputs"})
+            if "primary inputs" in lower and "bit widths" in lower:
+                return repaired("analysis_primary_io_summary", {"answer_style": "inputs"})
+            if "number of primary inputs and outputs" in lower or "how many primary inputs and primary outputs" in lower:
+                return repaired("analysis_primary_io_summary", {"answer_style": "counts"})
+
         if call.tool == "analysis_max_logic_depth":
             full_design_depth = (
                 "maximum combinational logic depth in the design" in lower
