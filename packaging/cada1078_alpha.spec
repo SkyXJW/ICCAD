@@ -15,6 +15,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(repo / "mcp_tools_spec.json"), "."),
+        (str(repo / "docs" / "llm_tool_routing_guide_for_llm.md"), "docs"),
         (str(repo / "abc_resources" / "abc.rc"), "abc_resources"),
         (str(repo / "abc_resources" / "my.genlib"), "abc_resources"),
     ] + collect_data_files("pyverilog"),

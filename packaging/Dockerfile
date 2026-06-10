@@ -19,6 +19,7 @@ RUN python -m pip install --upgrade pip \
 COPY src /src/src
 COPY abc_resources /src/abc_resources
 COPY mcp_tools_spec.json /src/mcp_tools_spec.json
+COPY docs/llm_tool_routing_guide_for_llm.md /src/docs/llm_tool_routing_guide_for_llm.md
 COPY packaging /src/packaging
 
 RUN bash /src/packaging/build_pyinstaller.sh
