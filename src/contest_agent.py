@@ -708,6 +708,17 @@ class RequestParser:
             if "number of primary inputs and outputs" in lower or "how many primary inputs and primary outputs" in lower:
                 return repaired("analysis_primary_io_summary", {"answer_style": "counts"})
 
+        if call.tool in {"analysis_register_paths", "analysis_register_path_depth"}:
+            if "register-to-register path" in lower and (
+                "maximum combinational depth" in lower
+                or "maximum depth" in lower
+                or "longest" in lower
+                or "critical" in lower
+            ):
+                return repaired("analysis_register_path_depth", {})
+            if "list" in lower and "register-to-register path" in lower:
+                return repaired("analysis_register_paths", {})
+
         if call.tool == "analysis_max_logic_depth":
             full_design_depth = (
                 "maximum combinational logic depth in the design" in lower

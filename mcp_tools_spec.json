@@ -900,8 +900,8 @@
     {
       "name": "analysis_register_paths",
       "category": "analysis",
-      "description": "analysis register paths",
-      "when_to_use": "analysis register paths",
+      "description": "Count/list register-to-register combinational paths from DFF outputs to DFF D inputs. This returns a path count/list, not a depth value.",
+      "when_to_use": "Use only when the request asks to list or count register-to-register paths. Do not use for maximum/longest/critical combinational depth on register-to-register paths; use analysis_register_path_depth for depth questions.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -915,6 +915,25 @@
       "returns": {
         "path_count": "integer",
         "paths": "array"
+      }
+    },
+    {
+      "name": "analysis_register_path_depth",
+      "category": "analysis",
+      "description": "Compute the maximum combinational depth on any register-to-register path.",
+      "when_to_use": "Use for questions asking maximum combinational depth, maximum depth, longest depth, or critical depth on register-to-register paths. Example: 'What is the maximum combinational depth on any register-to-register path in this design?'",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "max_depth": "integer"
       }
     },
     {
