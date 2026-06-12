@@ -900,12 +900,16 @@ def optimization_reduce_depth(
     target: Optional[str] = None,
     max_depth: Optional[int] = None,
     scope: str = "design",
+    library: Optional[str] = None,
+    lib_scope: Optional[str] = None,
+    lib_target: Optional[str] = None,
     design_id: str = "current",
 ) -> Dict[str, Any]:
     session = _get_session(design_id)
     previous_pre_transform_ir = session.pre_transform_ir
     session.pre_transform_ir = copy.deepcopy(session.ir)
-    stats = reduce_depth(session.ir, target=target, max_depth=max_depth, scope=scope)
+    stats = reduce_depth(session.ir, target=target, max_depth=max_depth, scope=scope,
+                         library=library, lib_scope=lib_scope, lib_target=lib_target)
     if stats.get("status") == "kept_original":
         session.pre_transform_ir = previous_pre_transform_ir
         session.last_stats = stats

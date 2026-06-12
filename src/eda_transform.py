@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import networkx as nx
 
-from ir import Cell, DeclRecord, Net, NetlistIR, SignalDecl
+from ir import Cell, DeclRecord, Net, NetlistIR, PinRef, SignalDecl
 from nx_probe import cell_node, net_node, node_to_readable
 
 
@@ -276,9 +276,24 @@ def write_ir(ir: NetlistIR, path: str | Path) -> Dict[str, Any]:
     return IRWriter(ir).write(path)
 
 
+def _primary_output_nets(ir: NetlistIR) -> Set[str]:
+    """所有主输出的 bit-net 名集合。A29: PO 连接也算一个 fanout load。"""
+    nets: Set[str] = set()
+    for sig in _signals(ir, "output"):
+        for bit in _signal_bits(ir, sig.name):
+            nets.add(bit)
+    return nets
+
+
+def _net_load_count(ir: NetlistIR, net: str, po_nets: Set[str]) -> int:
+    """net 的真实扇出 load 数 = cell 输入引脚 sink 数 + (该 net 是主输出则 +1)。"""
+    return len(ir.loads.get(net, [])) + (1 if net in po_nets else 0)
+
+
 def limit_fanout(ir: NetlistIR, max_fanout: int = 4, signal: Optional[str] = None, dedicated: bool = False) -> Dict[str, Any]:
     ctx = TransformContext(ir)
     ctx.rebuild()
+    po_nets = _primary_output_nets(ir)  # A29: 主输出抽头也算 load
     added = 0
     processed = 0
     targets = [signal] if signal else [net for net in list(ir.nets) if net not in CONSTANTS]
@@ -287,12 +302,25 @@ def limit_fanout(ir: NetlistIR, max_fanout: int = 4, signal: Optional[str] = Non
         if net not in ir.nets:
             continue
         loads = list(ir.loads.get(net, []))
-        if len(loads) <= max_fanout and not dedicated:
+        is_po = net in po_nets
+        effective = len(loads) + (1 if is_po else 0)  # A29: 把 PO 抽头计入扇出判定
+        if effective <= max_fanout and not dedicated:
             continue
         if not loads:
+            # 只有 PO 抽头、没有 cell 引脚 sink：无可重连的负载，跳过（也不会超阈值）。
             continue
         processed += 1
-        added += _buffer_loads(ctx, net, loads, max_fanout, dedicated)
+        if is_po and not dedicated and max_fanout >= 2:
+            # A29: net 必须保留为主输出（占 1 个 load）。把所有 cell 引脚负载汇到一个中继 buffer 后面，
+            # 使 net 只驱动 {PO, 中继} = 2 ≤ max_fanout，再对中继递归限流。
+            relay = ctx.new_wire(f"{net}_po_relay")
+            ctx.add_cell("buf", {"A": net}, relay, f"buf_{net}_po_relay")
+            added += 1
+            for load in loads:
+                ctx.reconnect_load(load.cell, load.pin, relay)
+            added += _buffer_loads(ctx, relay, loads, max_fanout, dedicated=False)
+        else:
+            added += _buffer_loads(ctx, net, loads, max_fanout, dedicated)
         # 原来每个 net 都 ctx.rebuild()（O(cells)）→ 大网表 O(nets×cells) 爆炸（test34 310s）。
         # buffer 只改“被处理 net 自己”的 loads，不影响其它 net，故循环内无需重建索引。
 
@@ -312,24 +340,23 @@ def _buffer_loads(ctx: TransformContext, source_net: str, loads, max_fanout: int
     else:
         groups = [loads[i : i + max_fanout] for i in range(0, len(loads), max_fanout)]
 
-    if len(groups) > max_fanout and not dedicated:
-        top_groups = [groups[i : i + max_fanout] for i in range(0, len(groups), max_fanout)]
-        for idx, group_set in enumerate(top_groups):
-            mid_net = ctx.new_wire(f"{source_net}_fanout_mid")
-            ctx.add_cell("buf", {"A": source_net}, mid_net, f"buf_{source_net}_fanout_mid")
-            added += 1
-            flattened = [load for group in group_set for load in group]
-            added += _buffer_loads(ctx, mid_net, flattened, max_fanout, dedicated=False)
-        return added
-
-    buffer_cells: Set[str] = set()
+    # 为每组建一个 buffer，buffer 驱动该组负载；记下每个 buffer 的输入引脚，
+    # 它们是 source_net 的“新负载”。
+    mid_pins: List[PinRef] = []
     for group in groups:
         buf_net = ctx.new_wire(f"{source_net}_buf")
         buf_name = ctx.add_cell("buf", {"A": source_net}, buf_net, f"buf_{source_net}")
-        buffer_cells.add(buf_name)
         added += 1
         for load in group:
             ctx.reconnect_load(load.cell, load.pin, buf_net)
+        mid_pins.append(PinRef(buf_name, "A"))
+
+    # source_net 现在驱动 len(groups) 个 buffer。非 dedicated 时若仍超过 max_fanout，
+    # 就对这些 buffer 的输入引脚再加一层（递归向上建树），保证 source_net 扇出 ≤ max_fanout。
+    # 之前的实现只做两层，当负载数 > max_fanout^3 时顶层会让 source_net 驱动 >max_fanout 个 buffer
+    # （如 test38 的 n0：571 个负载、限 8 → 旧实现源网扇出 9，违约）。递归向上彻底修掉该越界。
+    if not dedicated and len(mid_pins) > max_fanout:
+        added += _buffer_loads(ctx, source_net, mid_pins, max_fanout, dedicated=False)
     return added
 
 
@@ -714,9 +741,20 @@ def _replace_one_gate(ctx: TransformContext, cell: Cell, library: str) -> Counte
         return stats
 
     if library == "and_or_not":
+        if cell.cell_type == "nand":
+            add("not", {"A": add("and", {"A": a, "B": b})}, out)
+            return stats
+        if cell.cell_type == "nor":
+            add("not", {"A": add("or", {"A": a, "B": b})}, out)
+            return stats
         if cell.cell_type == "xor":
             t1 = add("and", {"A": a, "B": add("not", {"A": b})})
             t2 = add("and", {"A": add("not", {"A": a}), "B": b})
+            add("or", {"A": t1, "B": t2}, out)
+            return stats
+        if cell.cell_type == "xnor":
+            t1 = add("and", {"A": a, "B": b})
+            t2 = add("and", {"A": add("not", {"A": a}), "B": add("not", {"A": b})})
             add("or", {"A": t1, "B": t2}, out)
             return stats
         return _replace_one_gate(ctx, cell, "nand_not")
@@ -725,7 +763,8 @@ def _replace_one_gate(ctx: TransformContext, cell: Cell, library: str) -> Counte
 
 
 
-def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optional[int] = None, scope: str = "design") -> Dict[str, Any]:
+def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optional[int] = None, scope: str = "design",
+                 library: Optional[str] = None, lib_scope: Optional[str] = None, lib_target: Optional[str] = None) -> Dict[str, Any]:
     from eda_abc import reduce_depth_abc, rebuild_comb_from_abc, cec_equivalent
 
     base = {"scope": scope, "target": target}
@@ -759,6 +798,23 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
     # 3. CEC 验功能等价
     eq = cec_equivalent(ir, snapshot)
     if eq.get("equivalent") is True:
+        # 3b. 若该题带门库硬约束(如 "remains AND and NOT only" / "cone of X maintains only NAND,NOT"),
+        # 在深度优化后把【约束所指范围】归一化回要求的门库, 再 CEC 一次。
+        # library 为 None 时本段完全跳过 -> 其余 reduce_depth 调用行为不变。
+        if library:
+            _ls = lib_scope or scope
+            _lt = lib_target if (lib_scope == "cone") else target
+            post_abc = copy.deepcopy(ir)
+            replace_gate_library(ir, scope=_ls, target=_lt, to_library=library)
+            ir.rebuild_indices()
+            eq2 = cec_equivalent(ir, snapshot)
+            if eq2.get("equivalent") is True:
+                return {**base, **result, "status": "optimized", "equivalence": "verified", "library": library}
+            # 归一化后竟不等价(理论上不应发生) -> 回退到仅深度优化的结果, 保留功能正确
+            ir.__dict__.clear()
+            ir.__dict__.update(post_abc.__dict__)
+            return {**base, **result, "status": "optimized", "equivalence": "verified",
+                    "library_normalize": "skipped_failed_cec"}
         return {**base, **result, "status": "optimized", "equivalence": "verified"}
 
     # 4. 不等价 / UNKNOWN → 回滚，深度报回优化前
@@ -1028,13 +1084,14 @@ def _compute_value_numbers(ir: NetlistIR) -> Dict[str, int]:
 # Analysis: extended graph and netlist queries.
 def max_fanout(ir: NetlistIR, signal: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, Any]:
     ir.rebuild_indices()
+    po_nets = _primary_output_nets(ir)  # A29: 主输出抽头也算 load
     if signal:
         nets = [signal]
     elif scope == "primary_inputs":
         nets = [bit for sig in _signals(ir, "input") for bit in _signal_bits(ir, sig.name)]
     else:
         nets = [net for net in ir.nets if net not in CONSTANTS]
-    values = {net: len(ir.loads.get(net, [])) for net in nets if net in ir.nets}
+    values = {net: _net_load_count(ir, net, po_nets) for net in nets if net in ir.nets}
     if not values:
         return {"max_fanout": 0, "signals": [], "scope": scope or "all_nets"}
     maximum = max(values.values())
