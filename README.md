@@ -1,9 +1,5 @@
 # ICCAD Problem A EDA Agent
 
-LLM 驱动的门级网表 EDA Agent（v5/v6 integrated）。
-
-本项目是 `/home/xjw/Merge/iccad_contest_a_v5` 与 `/home/xjw/Merge/iccad_contest_a_v6` 的整合版，目标是在保留 v6 提交/评测包装能力的同时，集成 v5 的完整分析、变换、优化与验证功能。
-
 ## 项目概览
 
 整合版主要保留与移植了以下能力：
