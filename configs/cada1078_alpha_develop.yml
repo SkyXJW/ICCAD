@@ -10,7 +10,11 @@ openai:
   api_key: null
   model: gpt-4o-mini
 
-base_url: https://agent.evanora.top/v1
+anthropic:
+  api_key: null
+  model: claude-haiku-4-5
+
+base_url: https://oneai.evanora.top/v1
 
 parser: llm
 path_limit: 1000000
