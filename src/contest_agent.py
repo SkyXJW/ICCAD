@@ -150,7 +150,7 @@ class AgentConfig:
     miter_dir: Optional[Path] = None
     temperature: float = 0.0
     max_output_tokens: int = 4096
-    answer_artifact_threshold: int = 65_536
+    answer_artifact_threshold: int = 4096
     llm_review: bool = False
     auto_verify_transforms: bool = False
 
