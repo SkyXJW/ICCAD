@@ -1384,6 +1384,27 @@ def render_answer(call: ToolCall, result: Dict[str, Any], request: str) -> str:
             return str(result.get("added_by_type", {}).get("NOR", 0))
         if style == "nand_added":
             return str(result.get("added_by_type", {}).get("NAND", 0))
+        if tool == "optimization_reduce_depth":
+            scope_text = "design" if result.get("scope") == "design" else f"{result.get('scope', 'design')}"
+            depth_text = f" Final maximum logic depth is {result['depth']}." if "depth" in result else ""
+            if result.get("status") == "kept_original":
+                prefix = f"Kept the original {scope_text} because no functionally safe depth reduction was applied."
+            else:
+                prefix = f"Minimized the maximum logic depth of the {scope_text} successfully."
+            constraints = []
+            if result.get("equivalence") == "verified" or result.get("auto_equivalence", {}).get("equivalent") is True:
+                constraints.append("functional equivalence is verified")
+            library = result.get("library")
+            if library == "and_not":
+                constraints.append("the netlist remains AND and NOT only")
+            elif library == "nand_not":
+                constraints.append("the netlist remains NAND and NOT only")
+            elif library == "nor_not":
+                constraints.append("the netlist remains NOR and NOT only")
+            elif library == "and_or_not":
+                constraints.append("the netlist remains AND, OR, and NOT only")
+            suffix = f" {'And ' + '; '.join(constraints) + '.' if constraints else ''}"
+            return f"{prefix}{depth_text}{suffix}".strip()
         if "added_buffers" in result:
             return f"Inserted {result['added_buffers']} BUF gates."
         if "removed_gates" in result:
@@ -1398,8 +1419,6 @@ def render_answer(call: ToolCall, result: Dict[str, Any], request: str) -> str:
             return f"Replaced {result['replaced_gates']} gates."
         if "merged_gates" in result:
             return f"Merged {result['merged_gates']} gates."
-        if "depth" in result:
-            return str(result["depth"])
         return _result_sentence(result)
 
     if tool == "analysis_max_fanout":
