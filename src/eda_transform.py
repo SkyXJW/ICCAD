@@ -615,6 +615,24 @@ def replace_gate_library(
             continue
         if from_gate and cell.cell_type != from_gate.lower():
             continue
+        if cell.cell_type == "buf" and to_library in {"nand_not", "nor_not", "and_not", "and_or_not"}:
+            out = cell.outputs.get("Y")
+            a = cell.inputs.get("A")
+            if not out or not a:
+                continue
+            if _drives_primary_output(ir, out):
+                # 严格门库约束里 BUF 不算合法门；若 BUF 直接驱动 PO，不能简单旁路，
+                # 否则 writer 无 assign 可写，会让 PO 失去门级驱动。用两级 NOT 等价替换。
+                mid = ctx.new_wire(f"{cell.name}_buf_inv")
+                ctx.add_cell("not", {"A": a}, mid, f"{cell.name}_buf_inv")
+                ctx.add_cell("not", {"A": mid}, out, f"{cell.name}_buf_out")
+                added["NOT"] += 2
+            else:
+                # 非 PO BUF 可直接旁路：把所有负载从 BUF 输出改接到输入，再删除 BUF。
+                ctx.replace_loads(out, a, skip={cell.name})
+            replaced += 1
+            to_delete.add(name)
+            continue
         if _gate_allowed(cell.cell_type, to_library):
             continue
         stats = _replace_one_gate(ctx, cell, to_library)
@@ -642,10 +660,10 @@ def _selected_cells(ir: NetlistIR, scope: str, target: Optional[str]) -> Set[str
 
 def _gate_allowed(gate: str, library: str) -> bool:
     allowed = {
-        "nand_not": {"nand", "not", "buf"},
-        "nor_not": {"nor", "not", "buf"},
-        "and_not": {"and", "not", "buf"},
-        "and_or_not": {"and", "or", "not", "buf"},
+        "nand_not": {"nand", "not"},
+        "nor_not": {"nor", "not"},
+        "and_not": {"and", "not"},
+        "and_or_not": {"and", "or", "not"},
     }.get(library, set())
     return gate in allowed
 
