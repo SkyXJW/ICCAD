@@ -808,6 +808,7 @@ def transformation_limit_fanout(
     session.pre_transform_ir = copy.deepcopy(session.ir)
     stats = limit_fanout(session.ir, max_fanout=max_fanout, signal=signal, dedicated=dedicated)
     _mark_transform(session, stats)
+    stats["final_total_gate_count"] = session.analyzer.total_gate_count()
     return _ok("transformation_limit_fanout", design_id=session.design_id, **stats)
 
 

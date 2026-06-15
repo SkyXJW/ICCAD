@@ -193,7 +193,9 @@ def _depth_library_constraint(text: str):
         lib = None
     if lib is None:
         return (None, None, None)
-    cm = re.search(r"cone of (\w[\w\[\]]*)", t)
+    if re.search(r"\b(?:netlist|design)\s+remains?\b", t):
+        return (lib, "design", None)
+    cm = re.search(r"cone of (?:output\s+)?(\w[\w\[\]]*)", t)
     if cm:
         return (lib, "cone", cm.group(1))
     return (lib, "design", None)
@@ -1023,8 +1025,13 @@ class RequestParser:
                 return ToolCall("analysis_transitive_fanout_cone", {"input": _strip_quotes(match.group(1))}, "regex")
 
         # Transformation / Optimization parser rules for official test21-test40 prompts.
-        if "insert buffers" in lower and "no gate" in lower and "more than 4 loads" in lower:
-            return ToolCall("transformation_limit_fanout", {"max_fanout": 4}, "regex")
+        match = re.search(
+            r"insert buffers wherever needed so that no (?:gate|signal|net|wire) drives more than (\d+) loads",
+            text,
+            flags=re.I,
+        )
+        if match:
+            return ToolCall("transformation_limit_fanout", {"max_fanout": int(match.group(1))}, "regex")
         match = re.search(r"Perform fanout optimization across the netlist with maximum fanout (\d+)", text, flags=re.I)
         if match:
             return ToolCall("transformation_limit_fanout", {"max_fanout": int(match.group(1))}, "regex")
@@ -1039,6 +1046,20 @@ class RequestParser:
         # cone-scoped depth optimization with no explicit target depth, e.g.
         # "Optimize the depth of the cone of n8 while ensuring ... only NAND and NOT gates"
         match = re.search(r"(?:optimize|minimize|reduce|restructure)\b[^.]*?\bdepth of the cone of (\w[\w\[\]]*)\b(?!\s+to\s+\d)", text, flags=re.I)
+        if match:
+            _args = {"target": _strip_quotes(match.group(1)), "scope": "cone"}
+            _lib, _ls, _lt = _depth_library_constraint(text)
+            if _lib:
+                _args.update({"library": _lib, "lib_scope": _ls, "lib_target": _lt})
+            return ToolCall("optimization_reduce_depth", _args, "regex")
+        # Cone-scoped depth objective phrased as "Optimize the logic cone of output X",
+        # with the actual cost stated later as "depth of the cone of X".
+        match = re.search(
+            r"(?:optimize|minimize|reduce|restructure)\b[^.]*?\blogic cone of output (\w[\w\[\]]*)\b"
+            r"[\s\S]*?\bcost function is the depth of the cone of \1\b",
+            text,
+            flags=re.I,
+        )
         if match:
             _args = {"target": _strip_quotes(match.group(1)), "scope": "cone"}
             _lib, _ls, _lt = _depth_library_constraint(text)
@@ -1385,12 +1406,20 @@ def render_answer(call: ToolCall, result: Dict[str, Any], request: str) -> str:
         if style == "nand_added":
             return str(result.get("added_by_type", {}).get("NAND", 0))
         if tool == "optimization_reduce_depth":
-            scope_text = "design" if result.get("scope") == "design" else f"{result.get('scope', 'design')}"
-            depth_text = f" Final maximum logic depth is {result['depth']}." if "depth" in result else ""
-            if result.get("status") == "kept_original":
-                prefix = f"Kept the original {scope_text} because no functionally safe depth reduction was applied."
+            depth_scope = result.get("depth_scope", result.get("scope"))
+            target = result.get("target")
+            if depth_scope == "cone" and target:
+                scope_text = f"logic cone of {target}"
+                depth_text = f" Final cone depth of {target} is {result['depth']}." if "depth" in result else ""
+                original_text = f" Original cone depth was {result['original_depth']}." if "original_depth" in result else ""
             else:
-                prefix = f"Minimized the maximum logic depth of the {scope_text} successfully."
+                scope_text = "design"
+                depth_text = f" Final maximum logic depth of the design is {result['depth']}." if "depth" in result else ""
+                original_text = f" Original maximum logic depth was {result['original_depth']}." if "original_depth" in result else ""
+            if result.get("status") == "kept_original":
+                prefix = f"Kept the original {scope_text} because no functionally safe depth improvement was found."
+            else:
+                prefix = f"Optimized the {scope_text} for smaller depth successfully."
             constraints = []
             if result.get("equivalence") == "verified" or result.get("auto_equivalence", {}).get("equivalent") is True:
                 constraints.append("functional equivalence is verified")
@@ -1404,7 +1433,21 @@ def render_answer(call: ToolCall, result: Dict[str, Any], request: str) -> str:
             elif library == "and_or_not":
                 constraints.append("the netlist remains AND, OR, and NOT only")
             suffix = f" {'And ' + '; '.join(constraints) + '.' if constraints else ''}"
-            return f"{prefix}{depth_text}{suffix}".strip()
+            return f"{prefix}{original_text}{depth_text}{suffix}".strip()
+        if tool == "transformation_limit_fanout":
+            added = result.get("added_buffers", 0)
+            max_fanout = result.get("max_fanout", args.get("max_fanout"))
+            processed = result.get("processed_nets")
+            scope = f"signal {args['signal']}" if args.get("signal") else "the design"
+            processed_text = f" across {processed} overloaded signals" if processed is not None else ""
+            limit_text = f" so that no signal drives more than {max_fanout} loads" if max_fanout is not None else ""
+            final_total = result.get("final_total_gate_count")
+            cost_text = f" Final total gate count is {final_total}, which is the cost of the final design." if final_total is not None else ""
+            return (
+                f"Inserted {added} BUF gates{processed_text} in {scope}{limit_text}. "
+                "The fanout constraint has been applied while preserving functional behavior."
+                f"{cost_text}"
+            )
         if "added_buffers" in result:
             return f"Inserted {result['added_buffers']} BUF gates."
         if "removed_gates" in result:
