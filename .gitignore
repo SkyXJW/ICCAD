@@ -10,6 +10,7 @@
 !/packaging/requirements-packaging.txt
 !/packaging/cada1078_alpha.spec
 !/packaging/build_pyinstaller.sh
+!/packaging/pyi_runtime_eda.py
 /packaging/out/*
 
 /build/*
@@ -27,3 +28,4 @@ parsetab.py
 __pycache__/
 *.pyc
 *.csv
+cada1078_alpha

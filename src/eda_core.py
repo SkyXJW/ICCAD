@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +59,34 @@ from eda_transform import (
 GATE_COUNT_ORDER = ["and", "or", "not", "nand", "nor", "xor", "xnor", "buf", "dff"]
 COMB_GATES = {"and", "or", "nand", "nor", "not", "buf", "xor", "xnor"}
 NUM_RE = re.compile(r"(\d+)")
+
+
+def _bundled_eda_bin(name: str) -> Optional[str]:
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if not frozen_root:
+        return None
+    path = Path(frozen_root) / "eda" / "bin" / name
+    if path.exists() and os.access(path, os.X_OK):
+        return str(path)
+    return None
+
+
+def _resolve_yosys_bin() -> Optional[str]:
+    override = os.environ.get("YOSYS_BIN")
+    candidates = (override,) if override else ("yosys",)
+    for name in candidates:
+        if not name:
+            continue
+        found = shutil.which(name)
+        if found:
+            return found
+        path = Path(name).expanduser()
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path.resolve())
+        bundled = _bundled_eda_bin(Path(name).name)
+        if bundled:
+            return bundled
+    return _bundled_eda_bin("yosys")
 
 
 def natural_key(text: str):
@@ -371,18 +401,19 @@ class YosysEquivalenceChecker:
         self.timeout = timeout
 
     def equivalent(self, left: str, right: str) -> EquivalenceResult:
-        if shutil.which("yosys") is None:
+        yosys_bin = _resolve_yosys_bin()
+        if yosys_bin is None:
             return EquivalenceResult(
                 status="unknown",
                 method="yosys-sat-miter",
                 support_size=0,
                 support=[],
-                message="yosys executable was not found",
+                message="yosys executable was not found (tried YOSYS_BIN and yosys)",
             )
 
         try:
             miter_path, support = self._emit_miter(left, right)
-            output = self._run_yosys(miter_path)
+            output = self._run_yosys(miter_path, yosys_bin)
         except subprocess.TimeoutExpired:
             return EquivalenceResult(
                 status="unknown",
@@ -505,13 +536,14 @@ class YosysEquivalenceChecker:
         miter_path.write_text("\n".join(lines) + "\n")
         return miter_path, support
 
-    def _run_yosys(self, miter_path: Path) -> str:
+    def _run_yosys(self, miter_path: Path, yosys_bin: str) -> str:
         proc = subprocess.run(
             [
-                "yosys",
+                yosys_bin,
                 "-p",
-                f"read_verilog {miter_path}; prep -top miter; sat -prove diff 0 -show diff",
+                f"read_verilog {miter_path.name}; prep -top miter; sat -prove diff 0 -show diff",
             ],
+            cwd=str(miter_path.parent),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

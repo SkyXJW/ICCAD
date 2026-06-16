@@ -1,5 +1,5 @@
 # Contest-safe config for cada1078_alpha.
-# Do not set suite_root/log_dir here: suite_root defaults to /app for mounted inputs.
+# Do not set suite_root/log_dir here: both default to the invocation working directory.
 # After design_load, logs and relative design_write outputs are written beside the loaded design file.
 # 正式配置，最终提交使用，不要改动
 provider: openai

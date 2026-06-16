@@ -1,6 +1,8 @@
+import os
 import re
 import shutil
-import os
+import sys
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -37,6 +39,29 @@ def find_compiler_directives(text: str) -> List[Tuple[int, str]]:
     ]
 
 
+def _bundled_iverilog() -> Optional[str]:
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if not frozen_root:
+        return None
+    for name in ("iverilog", "iverilog.real"):
+        path = Path(frozen_root) / "eda" / "bin" / name
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def _iverilog_available() -> bool:
+    override = os.environ.get("IVERILOG_BIN")
+    if override:
+        if shutil.which(override) is not None:
+            return True
+        path = Path(override).expanduser()
+        return path.exists() and os.access(path, os.X_OK)
+    if shutil.which("iverilog") is not None:
+        return True
+    return _bundled_iverilog() is not None
+
+
 def parse_verilog_file(path: str):
     """
     Parse a Verilog file through Pyverilog.
@@ -45,8 +70,9 @@ def parse_verilog_file(path: str):
     unavailable, only plain Verilog without compiler directives is accepted.
     This avoids validating a non-preprocessed design and reporting a false OK.
     """
-    if shutil.which("iverilog") is not None:
-        return parse([path], debug=False)
+    if _iverilog_available():
+        with tempfile.TemporaryDirectory() as td:
+            return parse([path], outputdir=td, debug=False)
 
     text = Path(path).read_text()
     directives = find_compiler_directives(text)

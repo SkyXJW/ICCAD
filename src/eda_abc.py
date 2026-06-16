@@ -49,8 +49,7 @@ from ir import NetlistIR, Cell
 # ---------------------------------------------------------------------------
 # Configuration (override via environment variables)
 # ---------------------------------------------------------------------------
-ABC_BIN = os.environ.get("ABC_BIN", "abc")
-ABC_CEC_BIN = os.environ.get("ABC_CEC_BIN", "")
+ABC_CANDIDATES: Tuple[str, ...] = ("abc", "berkeley-abc", "yosys-abc")
 
 
 def _resource_root() -> Path:
@@ -63,13 +62,74 @@ def _resource_root() -> Path:
 
 # Default to the project's bundled ABC resources so the repo is self-contained.
 # Users can still override via env vars if they want a custom genlib/abc.rc.
-_BUNDLED = _resource_root() / "abc_resources"
-_DEFAULT_GENLIB = _BUNDLED / "my.genlib"
-_DEFAULT_ABC_RC = _BUNDLED / "abc.rc"
+def _bundled_resource(name: str) -> Path:
+    return _resource_root() / "abc_resources" / name
 
-GENLIB_PATH = os.environ.get("GENLIB_PATH") or (str(_DEFAULT_GENLIB) if _DEFAULT_GENLIB.exists() else "")
-ABC_RC_PATH = os.environ.get("ABC_RC_PATH") or (str(_DEFAULT_ABC_RC) if _DEFAULT_ABC_RC.exists() else "")
-ABC_TIMEOUT = int(os.environ.get("ABC_TIMEOUT", "120"))  # seconds per abc call
+
+def _env_path(env_name: str, bundled_name: str) -> Optional[Path]:
+    override = os.environ.get(env_name)
+    if override:
+        return Path(override).expanduser()
+    candidate = _bundled_resource(bundled_name)
+    return candidate if candidate.exists() else None
+
+
+def _abc_timeout() -> int:
+    return int(os.environ.get("ABC_TIMEOUT", "120"))
+
+
+def _bundled_eda_bin(name: str) -> Optional[str]:
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if not frozen_root:
+        return None
+    path = Path(frozen_root) / "eda" / "bin" / name
+    if path.exists() and os.access(path, os.X_OK):
+        return str(path)
+    return None
+
+
+def _resolve_executable(env_name: str, candidates: Tuple[str, ...]) -> Optional[str]:
+    override = os.environ.get(env_name)
+    names = (override,) if override else candidates
+    for name in names:
+        if not name:
+            continue
+        found = shutil.which(name)
+        if found:
+            return found
+        path = Path(name).expanduser()
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path.resolve())
+        bundled = _bundled_eda_bin(Path(name).name)
+        if bundled:
+            return bundled
+    if not override:
+        for name in candidates:
+            bundled = _bundled_eda_bin(Path(name).name)
+            if bundled:
+                return bundled
+    return None
+
+
+def _abc_binary() -> str:
+    binary = _resolve_executable("ABC_BIN", ABC_CANDIDATES)
+    if binary:
+        return binary
+    raise RuntimeError(
+        "abc binary not found (tried ABC_BIN, abc, berkeley-abc, yosys-abc). "
+        "Install Berkeley ABC or set ABC_BIN."
+    )
+
+
+def _copy_resource_to_workdir(resource: Optional[Path], workdir: Path, filename: str) -> Optional[str]:
+    if resource is None:
+        return None
+    if not resource.exists():
+        return None
+    dest = workdir / filename
+    shutil.copyfile(resource, dest)
+    return dest.name
+
 
 COMB_GATES = {"and", "or", "nand", "nor", "not", "buf", "xor", "xnor"}
 CONSTANTS = {"1'b0", "1'b1"}
@@ -282,34 +342,35 @@ def _signal_bits(ir: NetlistIR, name: str) -> List[str]:
 # 1. CEC equivalence
 # ---------------------------------------------------------------------------
 def _abc_for_cec() -> str:
-    if ABC_CEC_BIN:
-        return ABC_CEC_BIN
-    candidate = shutil.which("yosys-abc")
-    if candidate:
-        return candidate
-    abc_path = Path(ABC_BIN)
-    if abc_path.name == "abc":
-        sibling = abc_path.parent.parent / "bin" / "yosys-abc"
-        if sibling.exists():
+    override = _resolve_executable("ABC_CEC_BIN", ())
+    if override:
+        return override
+
+    yosys_abc = shutil.which("yosys-abc")
+    if yosys_abc:
+        return yosys_abc
+
+    abc = _abc_binary()
+    abc_path = Path(abc).resolve()
+    for sibling in (
+        abc_path.with_name("yosys-abc"),
+        abc_path.parent.parent / "bin" / "yosys-abc",
+    ):
+        if sibling.exists() and os.access(sibling, os.X_OK):
             return str(sibling)
-    return ABC_BIN
+    return abc
 
 
 def _run_abc(script: str, workdir: Path, *, abc_bin: Optional[str] = None) -> str:
     """Run a single `abc -c "<script>"` and return combined stdout/stderr."""
-    binary = abc_bin or ABC_BIN
-    if shutil.which(binary) is None:
-        raise RuntimeError(
-            f"abc binary not found (looked for {binary!r}). "
-            f"Install berkeley-abc or set ABC_BIN."
-        )
+    binary = abc_bin or _abc_binary()
     proc = subprocess.run(
         [binary, "-c", script],
         cwd=str(workdir),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=ABC_TIMEOUT,
+        timeout=_abc_timeout(),
         check=False,
     )
     return proc.stdout
@@ -394,9 +455,13 @@ def reduce_depth_abc(
         k = max_depth if max_depth is not None else 0
         map_cmd = f"map -D {k}" if k > 0 else "map"
 
-        # Source abc.rc for resyn2/dch aliases if provided.
-        prelude = f"source {ABC_RC_PATH}; " if ABC_RC_PATH else ""
-        lib = f"read_library {GENLIB_PATH}; " if GENLIB_PATH else ""
+        # Source abc.rc for resyn2/dch aliases if provided. Copy resources into
+        # the temporary ABC cwd so the ABC command script never depends on an
+        # absolute path (or on quoting paths with spaces from PyInstaller _MEIPASS).
+        rc_name = _copy_resource_to_workdir(_env_path("ABC_RC_PATH", "abc.rc"), work, "abc.rc")
+        genlib_name = _copy_resource_to_workdir(_env_path("GENLIB_PATH", "my.genlib"), work, "my.genlib")
+        prelude = f"source {rc_name}; " if rc_name else ""
+        lib = f"read_library {genlib_name}; " if genlib_name else ""
 
         script = (
             f"{prelude}{lib}"

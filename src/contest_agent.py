@@ -153,6 +153,7 @@ class AgentConfig:
     answer_artifact_threshold: int = 4096
     llm_review: bool = False
     auto_verify_transforms: bool = False
+    allow_absolute_output_paths: bool = False
 
 
 def _strip_quotes(value: str) -> str:
@@ -306,6 +307,7 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
         answer_artifact_threshold=answer_artifact_threshold,
         llm_review=_as_bool(_first_value(merged, "llm_review", "llm_self_check", "llm_judge", default=False)),
         auto_verify_transforms=_as_bool(_first_value(merged, "auto_verify_transforms", default=False)),
+        allow_absolute_output_paths=_as_bool(_first_value(merged, "allow_absolute_output_paths", default=False)),
     )
 
 
@@ -1579,16 +1581,23 @@ class ContestAgent:
     def _resolve_netlist_path(self, file_name: str, directory: str) -> Path:
         file_name = _strip_quotes(file_name)
         directory = _strip_quotes(directory).rstrip("/")
-        candidates = [
-            Path(directory) / file_name,
-            self.config.suite_root / directory / file_name,
-            Path.cwd() / directory / file_name,
-        ]
+        directory_path = Path(directory)
+        if directory_path.is_absolute():
+            candidates = [directory_path / file_name]
+        else:
+            candidates = [
+                directory_path / file_name,
+                self.config.suite_root / directory_path / file_name,
+                Path.cwd() / directory_path / file_name,
+            ]
         for candidate in candidates:
             if candidate.exists():
                 return candidate
 
-        case_dir = Path(directory).name
+        if directory_path.is_absolute():
+            raise FileNotFoundError(f"cannot resolve netlist: file={file_name} directory={directory}")
+
+        case_dir = directory_path.name
         matches = sorted(self.config.suite_root.glob(f"**/testcase/{case_dir}/{file_name}"))
         if matches:
             return matches[0]
@@ -1601,7 +1610,9 @@ class ContestAgent:
 
     def _resolve_output_path(self, output_path: str) -> Path:
         path = Path(_strip_quotes(output_path))
-        if path.is_absolute():
+        if path.is_absolute() and not self.config.allow_absolute_output_paths:
+            path = Path(path.name)
+        elif path.is_absolute():
             return path
         if self.current_testcase_dir is not None:
             return self.current_testcase_dir / path
@@ -1618,6 +1629,17 @@ class ContestAgent:
         filename = f"{base}_response_{response_id:04d}_answer.txt" if self.case_name else f"response_{response_id:04d}_answer.txt"
         return self._active_output_dir() / filename
 
+    def _display_path(self, path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(Path.cwd().resolve()))
+        except (OSError, ValueError):
+            if self.current_testcase_dir is not None:
+                try:
+                    return str(path.resolve().relative_to(self.current_testcase_dir.resolve()))
+                except (OSError, ValueError):
+                    pass
+            return path.name
+
     def _maybe_spill_long_answer(self, answer: str, response_id: int) -> str:
         threshold = self.config.answer_artifact_threshold
         if threshold <= 0 or len(answer) <= threshold:
@@ -1628,7 +1650,7 @@ class ContestAgent:
             out_dir.mkdir(parents=True, exist_ok=True)
             path = self._answer_artifact_path(response_id)
             path.write_text(answer, encoding="utf-8")
-            display_path = path.resolve()
+            display_path = self._display_path(path)
         except OSError as exc:
             print(
                 f"[warning] failed to write long answer artifact for response {response_id}: {exc}",
@@ -1661,12 +1683,23 @@ class ContestAgent:
             elif not new_log_path.exists():
                 new_log_path.write_text("")
             self.log_path = new_log_path
-        except OSError:
+        except OSError as exc:
+            print(
+                f"[warning] failed to create testcase log in {log_dir}: {exc}; falling back to cwd",
+                file=sys.stderr,
+            )
             self.config.log_dir = Path.cwd()
             self.current_testcase_dir = None
             fallback = self.config.log_dir / f"{self.case_name}.log"
-            fallback.write_text("")
-            self.log_path = fallback
+            try:
+                fallback.write_text("")
+                self.log_path = fallback
+            except OSError as fallback_exc:
+                print(
+                    f"[warning] failed to create fallback testcase log {fallback}: {fallback_exc}",
+                    file=sys.stderr,
+                )
+                self.log_path = None
 
     def _current_netlist_parent(self) -> Optional[Path]:
         # eda_core keeps the design state internally. Import lazily to avoid

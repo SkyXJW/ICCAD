@@ -1,24 +1,57 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
 
 spec_dir = Path(SPECPATH).resolve()
 repo = spec_dir.parent
-if not (repo / "src" / "contest_agent.py").exists():
-    repo = Path("/src")
+entrypoint = repo / "src" / "contest_agent.py"
+if not entrypoint.exists():
+    raise FileNotFoundError(f"cannot find contest entrypoint: {entrypoint}")
+
+eda_bundle = Path(os.environ.get("CADA_EDA_BUNDLE_DIR", repo / "packaging" / "out" / "eda_bundle")).resolve()
+if not eda_bundle.exists():
+    raise FileNotFoundError(f"cannot find staged EDA bundle: {eda_bundle}; run packaging/build_pyinstaller.sh")
+
+
+def tree_datas(src_root: Path, dest_root: str):
+    if not src_root.exists():
+        raise FileNotFoundError(f"missing bundled data directory: {src_root}")
+    result = []
+    for path in src_root.rglob("*"):
+        if path.is_file():
+            dest = Path(dest_root) / path.relative_to(src_root).parent
+            result.append((str(path), str(dest)))
+    return result
+
+
+eda_binaries = []
+for name in ["yosys", "berkeley-abc", "yosys-abc", "abc", "iverilog.real", "vvp"]:
+    path = eda_bundle / "bin" / name
+    if not path.exists():
+        raise FileNotFoundError(f"missing staged EDA executable: {path}")
+    eda_binaries.append((str(path), "eda/bin"))
+
+for path in (eda_bundle / "lib64").glob("*.so*"):
+    if path.is_file():
+        eda_binaries.append((str(path), "eda/lib64"))
+
+eda_datas = []
+eda_datas += tree_datas(eda_bundle / "share" / "yosys", "eda/share/yosys")
+eda_datas += tree_datas(eda_bundle / "lib" / "ivl", "eda/lib/ivl")
 
 a = Analysis(
-    [str(repo / "src" / "contest_agent.py")],
+    [str(entrypoint)],
     pathex=[str(repo / "src")],
-    binaries=[],
+    binaries=eda_binaries,
     datas=[
         (str(repo / "mcp_tools_spec.json"), "."),
         (str(repo / "docs" / "llm_tool_routing_guide_for_llm.md"), "docs"),
         (str(repo / "abc_resources" / "abc.rc"), "abc_resources"),
         (str(repo / "abc_resources" / "my.genlib"), "abc_resources"),
-    ] + collect_data_files("pyverilog"),
+    ] + eda_datas + collect_data_files("pyverilog"),
     hiddenimports=[
         "eda_core",
         "eda_transform",
@@ -34,11 +67,24 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(repo / "packaging" / "pyi_runtime_eda.py")],
     excludes=[
         "analysis_check",
         "verify_equiv",
         "llm_vs_regex",
+        # Keep the frozen contest binary small and avoid collecting optional
+        # scientific/ML stacks from the build environment. The agent only uses
+        # NetworkX core graph algorithms, not these optional integrations.
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "PIL",
+        "scipy",
+        "sklearn",
+        "tensorflow",
+        "torch",
+        "torchvision",
+        "triton",
     ],
     noarchive=False,
 )

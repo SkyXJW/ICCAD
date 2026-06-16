@@ -1,5 +1,0 @@
-networkx
-pyverilog
-pyyaml
-ply
-pyinstaller
