@@ -1498,22 +1498,61 @@ def articulation_points_between(ir: NetlistIR, source: str, target: str) -> Dict
             "articulation_points": [],
         }
 
-    points = []
-    for node in nx.articulation_points(graph):
-        if node in {source_node, target_node}:
-            continue
-        trial = graph.copy()
-        trial.remove_node(node)
-        if not nx.has_path(trial, source_node, target_node):
-            points.append(node_to_readable(node))
+    # Find s-t articulation points in one Tarjan DFS rooted at source_node.
+    # The previous implementation enumerated all articulation points and copied the
+    # full graph for each candidate, making large designs such as test34 O(V*(V+E)).
+    # With the DFS rooted at source_node, a non-endpoint vertex v separates source
+    # from target exactly when target is inside a DFS child subtree whose low-link
+    # cannot climb above v.
+    import sys
 
-    points = sorted(set(points))
+    old_limit = sys.getrecursionlimit()
+    if old_limit < len(graph) + 100:
+        sys.setrecursionlimit(len(graph) + 100)
+
+    disc: Dict[str, int] = {}
+    low: Dict[str, int] = {}
+    contains_target: Dict[str, bool] = {}
+    points: Set[str] = set()
+    time = 0
+
+    def dfs(node: str, parent: Optional[str]) -> None:
+        nonlocal time
+        disc[node] = low[node] = time
+        time += 1
+        subtree_has_target = node == target_node
+
+        for child in graph.neighbors(node):
+            if child == parent:
+                continue
+            if child not in disc:
+                dfs(child, node)
+                subtree_has_target = subtree_has_target or contains_target[child]
+                low[node] = min(low[node], low[child])
+                if (
+                    node not in {source_node, target_node}
+                    and contains_target[child]
+                    and low[child] >= disc[node]
+                ):
+                    points.add(node_to_readable(node))
+            else:
+                low[node] = min(low[node], disc[child])
+
+        contains_target[node] = subtree_has_target
+
+    try:
+        dfs(source_node, None)
+    finally:
+        if sys.getrecursionlimit() != old_limit:
+            sys.setrecursionlimit(old_limit)
+
+    sorted_points = sorted(points)
     return {
         "source": source,
         "target": target,
         "path_exists": True,
-        "count": len(points),
-        "articulation_points": points,
+        "count": len(sorted_points),
+        "articulation_points": sorted_points,
     }
 
 
