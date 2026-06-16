@@ -590,6 +590,17 @@ def _constant_replacement(cell: Cell):
             return "1'b0"
         if "1'b0" in vals and len(non_const) == 1:
             return ("not", x)
+    # gap④: XOR/XNOR 带常量输入化简
+    if cell.cell_type == "xor":
+        if "1'b0" in vals and len(non_const) == 1:
+            return ("wire", x)   # XOR(a,0)=a
+        if "1'b1" in vals and len(non_const) == 1:
+            return ("not", x)    # XOR(a,1)=NOT a
+    if cell.cell_type == "xnor":
+        if "1'b0" in vals and len(non_const) == 1:
+            return ("not", x)    # XNOR(a,0)=NOT a
+        if "1'b1" in vals and len(non_const) == 1:
+            return ("wire", x)   # XNOR(a,1)=a
     return None
 
 
@@ -600,6 +611,15 @@ def replace_gate_library(
     from_gate: Optional[str] = None,
     to_library: str = "nand_not",
 ) -> Dict[str, Any]:
+    # gap②: 未知目标库不再静默 no-op，显式报告 unsupported
+    _SUPPORTED_LIBS = {"nand_not", "nor_not", "and_not", "and_or_not", "or_not"}
+    if to_library not in _SUPPORTED_LIBS:
+        return {
+            "scope": scope, "target": target, "to_library": to_library,
+            "replaced_gates": 0, "added_by_type": {},
+            "unsupported_library": to_library,
+            "error": f"unsupported target library '{to_library}'; supported: {sorted(_SUPPORTED_LIBS)}",
+        }
     ctx = TransformContext(ir)
     ctx.rebuild()
     selected = _selected_cells(ir, scope, target)
@@ -614,7 +634,7 @@ def replace_gate_library(
             continue
         if from_gate and cell.cell_type != from_gate.lower():
             continue
-        if cell.cell_type == "buf" and to_library in {"nand_not", "nor_not", "and_not", "and_or_not"}:
+        if cell.cell_type == "buf" and to_library in {"nand_not", "nor_not", "and_not", "and_or_not", "or_not"}:
             out = cell.outputs.get("Y")
             a = cell.inputs.get("A")
             if not out or not a:
@@ -663,6 +683,7 @@ def _gate_allowed(gate: str, library: str) -> bool:
         "nor_not": {"nor", "not"},
         "and_not": {"and", "not"},
         "and_or_not": {"and", "or", "not"},
+        "or_not": {"or", "not"},
     }.get(library, set())
     return gate in allowed
 
@@ -673,7 +694,7 @@ def _replace_one_gate(ctx: TransformContext, cell: Cell, library: str) -> Counte
     a = cell.inputs.get("A")
     b = cell.inputs.get("B")
     if cell.cell_type in {"buf", "not"}:
-        if cell.cell_type == "buf" and library in {"nand_not", "nor_not", "and_not", "and_or_not"}:
+        if cell.cell_type == "buf" and library in {"nand_not", "nor_not", "and_not", "and_or_not", "or_not"}:
             ctx.replace_loads(out, a, skip={cell.name})
             return stats
         if cell.cell_type == "not" and _gate_allowed("not", library):
@@ -775,6 +796,26 @@ def _replace_one_gate(ctx: TransformContext, cell: Cell, library: str) -> Counte
             add("or", {"A": t1, "B": t2}, out)
             return stats
         return _replace_one_gate(ctx, cell, "nand_not")
+
+    if library == "or_not":
+        # 仅用 OR / NOT 重建。恒等式：AND(a,b)=NOT(OR(NOT a,NOT b))
+        if cell.cell_type == "and":
+            add("not", {"A": add("or", {"A": add("not", {"A": a}), "B": add("not", {"A": b})})}, out)
+        elif cell.cell_type == "nand":
+            add("or", {"A": add("not", {"A": a}), "B": add("not", {"A": b})}, out)
+        elif cell.cell_type == "nor":
+            add("not", {"A": add("or", {"A": a, "B": b})}, out)
+        elif cell.cell_type == "xor":
+            a_nb = add("not", {"A": add("or", {"A": add("not", {"A": a}), "B": b})})
+            na_b = add("not", {"A": add("or", {"A": a, "B": add("not", {"A": b})})})
+            add("or", {"A": a_nb, "B": na_b}, out)
+        elif cell.cell_type == "xnor":
+            a_nb = add("not", {"A": add("or", {"A": add("not", {"A": a}), "B": b})})
+            na_b = add("not", {"A": add("or", {"A": a, "B": add("not", {"A": b})})})
+            add("not", {"A": add("or", {"A": a_nb, "B": na_b})}, out)
+        else:
+            return stats
+        return stats
 
     return stats
 
