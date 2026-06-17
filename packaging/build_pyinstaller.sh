@@ -46,6 +46,47 @@ stage_ldd_libs() {
   done
 }
 
+validate_eda_bundle() {
+  local exe
+  for exe in yosys berkeley-abc yosys-abc abc iverilog.real vvp; do
+    if [[ ! -x "${EDA_BUNDLE_DIR}/bin/${exe}" ]]; then
+      echo "error: staged EDA executable is missing or not executable: ${EDA_BUNDLE_DIR}/bin/${exe}" >&2
+      exit 1
+    fi
+  done
+
+  if [[ ! -d "${EDA_BUNDLE_DIR}/share/yosys" ]]; then
+    echo "error: staged Yosys data directory is missing: ${EDA_BUNDLE_DIR}/share/yosys" >&2
+    exit 1
+  fi
+  if ! find "${EDA_BUNDLE_DIR}/share/yosys" -type f -print -quit | grep -q .; then
+    echo "error: staged Yosys data directory is empty: ${EDA_BUNDLE_DIR}/share/yosys" >&2
+    exit 1
+  fi
+  if [[ ! -d "${EDA_BUNDLE_DIR}/lib/ivl" ]]; then
+    echo "error: staged Icarus ivl directory is missing: ${EDA_BUNDLE_DIR}/lib/ivl" >&2
+    exit 1
+  fi
+  if ! find "${EDA_BUNDLE_DIR}/lib/ivl" -type f -print -quit | grep -q .; then
+    echo "error: staged Icarus ivl directory is empty: ${EDA_BUNDLE_DIR}/lib/ivl" >&2
+    exit 1
+  fi
+
+  local missing=0
+  for exe in yosys berkeley-abc yosys-abc iverilog.real vvp; do
+    if LD_LIBRARY_PATH="${EDA_BUNDLE_DIR}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+      ldd "${EDA_BUNDLE_DIR}/bin/${exe}" | grep -q "not found"; then
+      echo "error: unresolved shared library for staged executable: ${exe}" >&2
+      LD_LIBRARY_PATH="${EDA_BUNDLE_DIR}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        ldd "${EDA_BUNDLE_DIR}/bin/${exe}" >&2 || true
+      missing=1
+    fi
+  done
+  if [[ "${missing}" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
 stage_eda_bundle() {
   local yosys_bin berkeley_abc_bin yosys_abc_bin iverilog_bin vvp_bin
   yosys_bin="$(require_tool yosys)"
@@ -92,6 +133,7 @@ stage_eda_bundle() {
     "${EDA_BUNDLE_DIR}/bin/iverilog.real" \
     "${EDA_BUNDLE_DIR}/bin/vvp"
 
+  validate_eda_bundle
   echo "Staged EDA bundle at ${EDA_BUNDLE_DIR}"
 }
 
@@ -106,3 +148,7 @@ pyinstaller --clean --noconfirm \
 chmod +x "${DIST_DIR}/cada1078_alpha"
 cp "${DIST_DIR}/cada1078_alpha" "${REPO_ROOT}/cada1078_alpha"
 chmod +x "${REPO_ROOT}/cada1078_alpha"
+
+if grep -a -q "${REPO_ROOT}" "${REPO_ROOT}/cada1078_alpha"; then
+  echo "warning: final executable contains build repo path string: ${REPO_ROOT}" >&2
+fi

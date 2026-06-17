@@ -14,6 +14,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+try:
+    import certifi
+except Exception:  # pragma: no cover - depends on frozen optional bundle
+    certifi = None
+
 
 def _prepend_env_path(name: str, value: Path) -> None:
     if not value.exists():
@@ -36,12 +41,31 @@ def _write_iverilog_wrapper(wrapper_dir: Path, real_iverilog: Path, ivl_dir: Pat
     return wrapper
 
 
+def _ca_bundle_path(root: Path) -> Path | None:
+    if certifi is not None:
+        try:
+            ca_bundle = Path(certifi.where())
+        except Exception:
+            ca_bundle = None
+        if ca_bundle is not None and ca_bundle.exists():
+            return ca_bundle
+    bundled = root / "certifi" / "cacert.pem"
+    if bundled.exists():
+        return bundled
+    return None
+
+
 root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 eda = root / "eda"
 bin_dir = eda / "bin"
 lib_dir = eda / "lib64"
 yosys_share = eda / "share" / "yosys"
 ivl_dir = eda / "lib" / "ivl"
+
+ca_bundle = _ca_bundle_path(root)
+if ca_bundle is not None:
+    os.environ.setdefault("SSL_CERT_FILE", str(ca_bundle))
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", str(ca_bundle))
 
 # Child-process dynamic linker search path. This is intentionally scoped to
 # subprocesses launched after startup; do not bundle or override glibc itself.

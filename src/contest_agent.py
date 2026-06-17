@@ -8,12 +8,18 @@ import re
 import sys
 import time
 import signal
+import ssl
 import contextlib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+try:
+    import certifi
+except Exception:  # pragma: no cover - optional CA bundle for frozen/portable builds
+    certifi = None
 
 try:
     import yaml
@@ -311,13 +317,35 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
     )
 
 
+def _ca_bundle_path() -> Optional[Path]:
+    if certifi is not None:
+        try:
+            ca_path = Path(certifi.where())
+        except Exception:
+            ca_path = None
+        if ca_path is not None and ca_path.exists():
+            return ca_path
+    bundled = _resource_root() / "certifi" / "cacert.pem"
+    if bundled.exists():
+        return bundled
+    return None
+
+
+def _https_context() -> Optional[ssl.SSLContext]:
+    ca_path = _ca_bundle_path()
+    if ca_path is None:
+        return None
+    return ssl.create_default_context(cafile=str(ca_path))
+
+
 def _json_post(url: str, headers: Dict[str, str], body: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
     data = json.dumps(body).encode("utf-8")
     last_error: Optional[BaseException] = None
+    context = _https_context()
     for attempt in range(6):
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -355,10 +383,18 @@ def _resource_root() -> Path:
 
 
 def _default_tool_spec_path(suite_root: Path) -> Path:
+    override = os.environ.get("CADA_TOOL_SPEC_PATH")
+    if override:
+        return Path(override)
+
+    bundled = _resource_root() / "mcp_tools_spec.json"
+    if getattr(sys, "_MEIPASS", None):
+        return bundled
+
     candidate = suite_root / "mcp_tools_spec.json"
     if candidate.exists():
         return candidate
-    return _resource_root() / "mcp_tools_spec.json"
+    return bundled
 
 
 def load_tool_contract(suite_root: Path) -> Dict[str, Any]:

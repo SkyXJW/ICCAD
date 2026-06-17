@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import importlib.util
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
@@ -42,6 +44,19 @@ eda_datas = []
 eda_datas += tree_datas(eda_bundle / "share" / "yosys", "eda/share/yosys")
 eda_datas += tree_datas(eda_bundle / "lib" / "ivl", "eda/lib/ivl")
 
+certifi_datas = []
+certifi_hiddenimports = []
+if importlib.util.find_spec("certifi") is not None:
+    certifi_datas += collect_data_files("certifi")
+    certifi_hiddenimports.append("certifi")
+ca_bundle = Path(sys.prefix) / "ssl" / "cacert.pem"
+if ca_bundle.exists():
+    certifi_datas.append((str(ca_bundle), "certifi"))
+elif not certifi_datas:
+    raise FileNotFoundError(
+        "cannot find certifi package or conda CA bundle; install certifi or ca-certificates in the build environment"
+    )
+
 a = Analysis(
     [str(entrypoint)],
     pathex=[str(repo / "src")],
@@ -51,7 +66,7 @@ a = Analysis(
         (str(repo / "docs" / "llm_tool_routing_guide_for_llm.md"), "docs"),
         (str(repo / "abc_resources" / "abc.rc"), "abc_resources"),
         (str(repo / "abc_resources" / "my.genlib"), "abc_resources"),
-    ] + eda_datas + collect_data_files("pyverilog"),
+    ] + eda_datas + collect_data_files("pyverilog") + certifi_datas,
     hiddenimports=[
         "eda_core",
         "eda_transform",
@@ -64,7 +79,7 @@ a = Analysis(
         "ply.lex",
         "ply.yacc",
         "yaml",
-    ],
+    ] + certifi_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(repo / "packaging" / "pyi_runtime_eda.py")],
