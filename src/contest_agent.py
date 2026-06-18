@@ -409,7 +409,8 @@ _TOOL_DESC_OVERRIDES = {
     "analysis_cone_gate_type_count": "Report the per-gate-type count within the fanin cone of `target` (an output/signal); the renderer outputs only the requested gate type's count. Use for 'how many <TYPE> gates are in the cone of X'.",
     "analysis_pi_to_dff_depth": "Compute the maximum combinational depth from primary inputs to DFF data (D) inputs.",
     "analysis_outputs_depth_over": "List the outputs whose combinational logic depth exceeds the integer `threshold`.",
-    "analysis_largest_fanin_cone_output": "Find the output whose fanin cone contains the most gates; report that output and its cone size.",
+    "analysis_deepest_output": "Find the output with the DEEPEST fanin cone, judged by logic DEPTH (the number of gate levels / longest path). Use this for 'deepest fanin cone', 'deepest logic cone', 'deepest fanin logic'. Judge by DEPTH, NOT by gate count.",
+    "analysis_largest_fanin_cone_output": "Find the output whose fanin cone is LARGEST by SIZE (the NUMBER of gates it contains). Use this for 'largest/biggest fanin cone' or 'cone with the most gates'. Judge by gate COUNT, NOT by depth.",
     "analysis_find_nand_equivalent": "Find the NAND gate(s) whose output net is `target`; report how many and their inputs.",
     "analysis_shared_fanin_cone": "List the gates shared by the fanin cones of two signals `left` and `right`.",
     "analysis_zero_length_paths": "Count zero-length combinational paths (a primary input wired directly to a primary output with no gate in between).",
@@ -524,10 +525,126 @@ Decide by WHO is the driver:
 - Named signal with target depth: "Try to restructure n8 with a target depth of 4", "Try to optimize n15 to at most 4 levels deep", "Attempt to reduce the depth of the cone of n8 to 4" -> optimization_reduce_depth(scope=cone,target=X,max_depth=N).
 - "For each output with depth greater than N, optimize its cone" -> optimization_reduce_depth(scope=outputs_over_depth,max_depth=N).
 - KEY: Any request to optimize/reduce/restructure/balance logic depth is a TRANSFORMATION (optimization_reduce_depth), not an analysis. Analysis only when asking "What is / Compute / Determine" the depth value.
+- GATE-LIBRARY CONSTRAINT on a depth-optimization request: when the SAME request also says the result must use ONLY a specific gate set (e.g. "while ensuring the design remains AND and NOT only", "ensuring the cone of n8 maintains only NAND and NOT gates", "the netlist remains using only NOR and NOT"), you MUST add these THREE arguments to the SAME optimization_reduce_depth call (do NOT switch to a different tool, do NOT use to_library/from_gate which belong to a different tool):
+    * library: the required gate set, one of "and_not" (AND+NOT only), "nand_not" (NAND+NOT only), "nor_not" (NOR+NOT only), "and_or_not" (AND+OR+NOT only).
+    * lib_scope: "design" if the constraint applies to the whole netlist/design, or "cone" if it applies to the cone of a named signal.
+    * lib_target: the signal name when lib_scope="cone" (e.g. "n8"); omit it when lib_scope="design".
+  Examples: "Minimize the critical path depth of the design, ensuring the netlist remains AND and NOT only" -> optimization_reduce_depth(scope=design, library=and_not, lib_scope=design). "Optimize the depth of the cone of n8 while ensuring the cone of n8 maintains only NAND and NOT" -> optimization_reduce_depth(scope=cone, target=n8, library=nand_not, lib_scope=cone, lib_target=n8). "Optimize the logic cone of output n14 ... remains using only NAND and NOT" -> optimization_reduce_depth(scope=cone, target=n14, library=nand_not, lib_scope=design).
+  Put the gate-library constraint in library/lib_scope/lib_target, NOT in target/scope. target/scope describe WHAT to optimize; library/lib_scope/lib_target describe the gate-set the RESULT must obey.
 
 === Functional-Preservation Clauses ===
 "Ensure functionality does not change", "Make sure nothing changes functionally", "preserving functional equivalence", "Ensure the design functionality does not change" are CONSTRAINTS on a transformation/optimization request. They do NOT change the route to a verification tool. Choose verification tools (verification_functional_equivalence, verification_design_equivalence) ONLY when the main requested action is verify/prove/check/confirm the equivalence itself.
 """
+
+
+def _describe_tools(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract the compact tool list with descriptions, shared by system-prompt and FC paths."""
+    protocol_tools = [
+        {
+            "name": "begin_testcase",
+            "description": "Initialize a testcase and start writing responses to <case_name>.log.",
+            "when_to_use": "Use for requests like 'This is the beginning of a new testcase. The case name is test03.'",
+            "parameters": {
+                "type": "object",
+                "properties": {"case_name": {"type": "string"}},
+                "required": ["case_name"],
+            },
+        },
+        {
+            "name": "design_load",
+            "description": "Load a testcase design. For LLM parsing, return file_name and directory exactly from the request; the agent resolves the full path.",
+            "when_to_use": "Use for requests asking to load/read a design from a file in a directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_name": {"type": "string"},
+                    "directory": {"type": "string"},
+                },
+                "required": ["file_name", "directory"],
+            },
+        },
+    ]
+    spec_tools = [tool for tool in tool_contract.get("tools", []) if tool.get("name") != "design_load"]
+    llm_tools = protocol_tools + spec_tools
+    compact = []
+    for tool in llm_tools:
+        name = tool.get("name")
+        if name in _TOOL_DESC_OVERRIDES:
+            desc, wtu = _TOOL_DESC_OVERRIDES[name], ""
+        else:
+            desc, wtu = tool.get("description", ""), tool.get("when_to_use", "")
+        compact.append(
+            {
+                "name": name,
+                "description": desc,
+                "when_to_use": wtu,
+                "parameters": tool.get("parameters", {}),
+            }
+        )
+    return compact
+
+
+def _tools_for_openai(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build the ``tools`` list in OpenAI Function Calling format."""
+    compact = _describe_tools(tool_contract)
+    fc_tools: List[Dict[str, Any]] = []
+    for item in compact:
+        desc_parts = [item["description"]]
+        if item.get("when_to_use"):
+            desc_parts.append(item["when_to_use"])
+        fc_desc = " ".join(desc_parts).strip()
+        params = dict(item.get("parameters", {}))
+        # Ensure the top-level JSON Schema envelope is present.
+        if "type" not in params:
+            params = {"type": "object", "properties": params}
+        if "required" not in params:
+            # Derive required from TOOL_REQUIRED_ARGS, excluding internal args like design_id.
+            required = [
+                k for k in TOOL_REQUIRED_ARGS.get(item["name"], [])
+                if k in params.get("properties", {})
+            ]
+            if required:
+                params["required"] = required
+        fc_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": item["name"],
+                    "description": fc_desc,
+                    "parameters": params,
+                },
+            }
+        )
+    return fc_tools
+
+
+def _tools_for_anthropic(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build the ``tools`` list in Anthropic tool-use format."""
+    compact = _describe_tools(tool_contract)
+    at_tools: List[Dict[str, Any]] = []
+    for item in compact:
+        desc_parts = [item["description"]]
+        if item.get("when_to_use"):
+            desc_parts.append(item["when_to_use"])
+        at_desc = " ".join(desc_parts).strip()
+        params = dict(item.get("parameters", {}))
+        if "type" not in params:
+            params = {"type": "object", "properties": params}
+        if "required" not in params:
+            required = [
+                k for k in TOOL_REQUIRED_ARGS.get(item["name"], [])
+                if k in params.get("properties", {})
+            ]
+            if required:
+                params["required"] = required
+        at_tools.append(
+            {
+                "name": item["name"],
+                "description": at_desc,
+                "input_schema": params,
+            }
+        )
+    return at_tools
 
 
 def build_llm_system_prompt(tool_contract: Dict[str, Any]) -> str:
@@ -660,6 +777,8 @@ class RequestParser:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.tool_contract = load_tool_contract(config.suite_root)
+        self.tools_openai = _tools_for_openai(self.tool_contract)
+        self.tools_anthropic = _tools_for_anthropic(self.tool_contract)
         self.system_prompt = build_llm_system_prompt(self.tool_contract)
         self.review_prompt = build_llm_review_prompt(self.tool_contract)
 
@@ -702,9 +821,9 @@ class RequestParser:
         user = f"Request: {request}"
 
         if self.config.provider == "anthropic":
-            payload = self._call_anthropic(system, user)
+            payload = self._call_anthropic(system, user, tools=self.tools_anthropic)
         else:
-            payload = self._call_openai(system, user)
+            payload = self._call_openai(system, user, tools=self.tools_openai)
 
         tool = str(payload.get("tool", ""))
         args = payload.get("arguments", {})
@@ -875,12 +994,16 @@ class RequestParser:
                 return repaired(call.tool, args)
         return call
 
-    def _call_openai(self, system: str, user: str) -> Dict[str, Any]:
+    def _call_openai(self, system: str, user: str, *, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         base_url = self.config.base_url or "https://api.openai.com/v1"
         url = base_url.rstrip("/")
         if not url.endswith("/chat/completions"):
             url += "/chat/completions"
-        body = {
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        base_body: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -888,40 +1011,56 @@ class RequestParser:
             ],
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_output_tokens,
-            "response_format": {"type": "json_object"},
         }
-        data = _json_post(
-            url,
-            {
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-            },
-            body,
-        )
+        if tools:
+            # --- Function Calling path ---
+            body = dict(base_body)
+            body["tools"] = tools
+            body["tool_choice"] = "required"
+            data = _json_post(url, headers, body)
+            tool_calls = data["choices"][0]["message"].get("tool_calls", [])
+            if tool_calls:
+                fc = tool_calls[0]["function"]
+                return {"tool": fc["name"], "arguments": json.loads(fc["arguments"])}
+            # Endpoint ignored/stripped the tools params (some OpenAI-compatible
+            # proxies do this). Fall back to JSON mode instead of failing the request.
+        # --- Legacy JSON Mode path (used by review/judge calls and FC fallback) ---
+        body = dict(base_body)
+        body["response_format"] = {"type": "json_object"}
+        data = _json_post(url, headers, body)
         content = data["choices"][0]["message"]["content"]
         return _extract_json_object(content)
 
-    def _call_anthropic(self, system: str, user: str) -> Dict[str, Any]:
+    def _call_anthropic(self, system: str, user: str, *, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         base_url = self.config.base_url or "https://api.anthropic.com/v1/messages"
         url = base_url.rstrip("/")
         if not url.endswith("/messages"):
             url += "/messages"
-        body = {
+        headers = {
+            "x-api-key": str(self.config.api_key),
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        base_body: Dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_output_tokens,
             "temperature": self.config.temperature,
             "system": system,
             "messages": [{"role": "user", "content": user}],
         }
-        data = _json_post(
-            url,
-            {
-                "x-api-key": str(self.config.api_key),
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            body,
-        )
+        if tools:
+            # --- Function Calling path ---
+            body = dict(base_body)
+            body["tools"] = tools
+            body["tool_choice"] = {"type": "any"}
+            data = _json_post(url, headers, body)
+            tool_uses = [b for b in data.get("content", []) if b.get("type") == "tool_use"]
+            if tool_uses:
+                tu = tool_uses[0]
+                return {"tool": tu["name"], "arguments": tu["input"]}
+            # Endpoint ignored/stripped the tools params; fall back to JSON mode.
+        # --- Legacy JSON Mode path (used by review/judge calls and FC fallback) ---
+        data = _json_post(url, headers, base_body)
         content_blocks = data.get("content", [])
         text = "".join(block.get("text", "") for block in content_blocks if block.get("type") == "text")
         return _extract_json_object(text)
@@ -1360,7 +1499,11 @@ def render_answer(call: ToolCall, result: Dict[str, Any], request: str) -> str:
         )
 
     if tool == "design_load":
-        return f'Loaded gate-level Verilog from "{result["netlist_path"]}" successfully.'
+        answer = f'Loaded gate-level Verilog from "{result["netlist_path"]}" successfully.'
+        log_moved_path = result.get("log_moved_path")
+        if log_moved_path:
+            answer += f' The testcase log file {Path(log_moved_path).name} is now located at {Path(log_moved_path).parent}.'
+        return answer
 
     if tool == "design_write":
         return f'Wrote the current design to "{result["output_path"]}" successfully.'
@@ -1702,9 +1845,10 @@ class ContestAgent:
             summary = f"{m.group(1)} {m.group(2)}. "
         return f"{summary}Full result written to file: {display_path}"
 
-    def _set_log_path_for_current_case(self) -> None:
+    def _set_log_path_for_current_case(self) -> Optional[Path]:
         if not self.case_name:
-            return
+            return None
+        moved_to: Optional[Path] = None
         log_dir = self._active_output_dir()
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -1716,9 +1860,11 @@ class ContestAgent:
                     self.log_path.unlink()
                 except OSError:
                     pass
+                moved_to = new_log_path
             elif not new_log_path.exists():
                 new_log_path.write_text("")
             self.log_path = new_log_path
+            return moved_to
         except OSError as exc:
             print(
                 f"[warning] failed to create testcase log in {log_dir}: {exc}; falling back to cwd",
@@ -1736,6 +1882,7 @@ class ContestAgent:
                     file=sys.stderr,
                 )
                 self.log_path = None
+            return None
 
     def _current_netlist_parent(self) -> Optional[Path]:
         # eda_core keeps the design state internally. Import lazily to avoid
@@ -1874,16 +2021,19 @@ class ContestAgent:
         if tool == "design_load":
             netlist = self._resolve_netlist_path(str(args["file_name"]), str(args["directory"]))
             self.current_testcase_dir = netlist.parent
-            self._set_log_path_for_current_case()
+            log_moved_path = self._set_log_path_for_current_case()
             miter_dir = self.config.miter_dir
             if miter_dir is None and self.case_name:
                 miter_dir = self._active_output_dir() / "yosys_miters" / self.case_name
-            return design_load(
+            result = design_load(
                 netlist,
                 design_id="current",
                 miter_dir=miter_dir,
                 yosys_timeout=self.config.yosys_timeout,
             )
+            if log_moved_path is not None:
+                result["log_moved_path"] = self._display_path(log_moved_path)
+            return result
 
         if tool == "design_write":
             return design_write(self._resolve_output_path(str(args["output_path"])), design_id="current")
