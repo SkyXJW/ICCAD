@@ -688,6 +688,33 @@ def _gate_allowed(gate: str, library: str) -> bool:
     return gate in allowed
 
 
+def _gate_library_satisfied(ir: NetlistIR, library: str,
+                            scope: str = "design", target: Optional[str] = None) -> bool:
+    """True iff EVERY combinational gate in the constrained region is allowed by
+    `library`. DFFs are exempt (sequential, not part of the gate-library rule).
+
+    Used to skip the redundant replace_gate_library pass when ABC already mapped
+    onto the restricted genlib. Deliberately STRICT: any 'buf' or any gate
+    outside the allowed set returns False, so the caller falls back to the
+    explicit normalization (which knows how to remove buffers safely). This
+    never makes the result worse -- it only decides whether the extra pass runs.
+    """
+    try:
+        selected = _selected_cells(ir, scope, target)
+    except Exception:
+        return False
+    for name in ir.cell_order:
+        if name not in selected or name not in ir.cells:
+            continue
+        cell = ir.cells[name]
+        if cell.cell_type == "dff":
+            continue
+        if not _gate_allowed(cell.cell_type, library):
+            # includes 'buf', constants-as-gates, or any disallowed gate
+            return False
+    return True
+
+
 def _replace_one_gate(ctx: TransformContext, cell: Cell, library: str) -> Counter:
     stats = Counter()
     out = cell.outputs["Y"]
@@ -843,7 +870,12 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
             }
 
     # 1. ABC 深度优化；result 里带 ABC 真实的 before/after lev
-    result = reduce_depth_abc(ir, max_depth=max_depth)
+    #    若该题带门库硬约束(library 非 None),直接让 ABC 在受限门库下做深度优化,
+    #    这样 depth 已是受限库下可达的最优,避免"先全库优化、再拆库把层数加回去"。
+    #    _restricted_genlib_text 不认识的 library 会让 reduce_depth_abc 回退到全库,
+    #    下游 3b 仍会做一次归一化兜底,所以这一步只会更好、不会更差。
+    _abc_lib = library if (library and (lib_scope in (None, "design") or scope == "design")) else None
+    result = reduce_depth_abc(ir, max_depth=max_depth, library=_abc_lib)
     opt_v = result.pop("_optimized_verilog", "")
     if not opt_v:
         return {**base, **result, "status": "kept_original",
@@ -876,11 +908,14 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
             if extra:
                 payload.update(extra)
 
-            # 对 cone-scoped cost，接受全局 ABC 改写前必须确认目标 cone 的 depth 真的变小；
-            # 否则按 prompt 要求 report original，避免把 ABC 的全局 depth 误当作 cone cost。
-            if scope == "cone" and target and reported_depth >= reported_original_depth:
+            # 优化绝不能让 cost(depth) 变差。任何 scope 下，只要优化后报告的 depth
+            # 没有真正变小(>= 原始)，就回退到原图并 report original —— 满足 "smaller is better"。
+            # 注意：cone 题按目标 cone 的 depth 判定；design 题按整图 depth 判定。
+            if reported_depth >= reported_original_depth:
                 ir.__dict__.clear()
                 ir.__dict__.update(snapshot.__dict__)
+                _why = "cone_not_improved" if (scope == "cone" and target) else "design_not_improved"
+                _what = f"Cone of {target}" if (scope == "cone" and target) else "Design"
                 kept_payload = {
                     **base,
                     **result,
@@ -890,9 +925,9 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
                     "depth": reported_original_depth,
                     "depth_scope": scope,
                     "status": "kept_original",
-                    "reason": "cone_not_improved",
+                    "reason": _why,
                     "equivalence": "verified",
-                    "message": f"Cone of {target} was not improved; original kept.",
+                    "message": f"{_what} was not improved (depth would not decrease); original kept.",
                 }
                 if extra:
                     kept_payload.update(extra)
@@ -902,6 +937,14 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
         # 3b. 若该题带门库硬约束(如 "remains AND and NOT only" / "cone of X maintains only NAND,NOT"),
         # 在深度优化后把【约束所指范围】归一化回要求的门库, 再 CEC 一次。
         # library 为 None 时本段完全跳过 -> 其余 reduce_depth 调用行为不变。
+        #
+        # 例外: 若 _abc_lib 已生效(ABC 直接在受限门库下做了深度优化), 输出已经只含
+        # 约束门库, 再跑一次 replace_gate_library 是冗余的, 而且它可能重建结构、改变
+        # depth, 把刚优化好的层数又改掉。因此先做一次门库合规性校验: 已合规就直接收尾,
+        # 不再拆库; 万一 ABC 输出意外含了约束外的门, 再走原来的归一化兜底。
+        if library and _abc_lib and _gate_library_satisfied(ir, library, scope=lib_scope or scope,
+                                                            target=(lib_target if lib_scope == "cone" else target)):
+            return _finish_depth_result({"library": library, "library_via": "abc_restricted_genlib"})
         if library:
             _ls = lib_scope or scope
             _lt = lib_target if (lib_scope == "cone") else target

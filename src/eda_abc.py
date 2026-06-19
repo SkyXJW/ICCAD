@@ -136,6 +136,57 @@ CONSTANTS = {"1'b0", "1'b1"}
 
 
 # ---------------------------------------------------------------------------
+# Restricted gate-library genlibs for constrained depth optimization.
+# When a depth task also says "remains AND and NOT only", optimizing on the FULL
+# 9-gate library and THEN decomposing to AND/NOT re-introduces levels (an OR or
+# XOR expands into several AND/NOT stages), wiping out the depth win. Instead we
+# hand ABC a genlib that ONLY contains the allowed gates, so 'if -g' minimizes
+# depth *already inside that library* and no post-hoc decomposition is needed.
+# ---------------------------------------------------------------------------
+_GENLIB_HEADER = "GATE zero    0 O=CONST0;\nGATE one     0 O=CONST1;\n"
+_GENLIB_GATES = {
+    "buf":   "GATE buf     1 O=a;           PIN * NONINV 1 999 1 0 1 0\n",
+    "inv":   "GATE inv     1 O=!a;          PIN * INV    1 999 1 0 1 0\n",
+    "and2":  "GATE and2    1 O=a*b;         PIN * NONINV 1 999 1 0 1 0\n",
+    "or2":   "GATE or2     1 O=a+b;         PIN * NONINV 1 999 1 0 1 0\n",
+    "nand2": "GATE nand2   1 O=!(a*b);      PIN * INV    1 999 1 0 1 0\n",
+    "nor2":  "GATE nor2    1 O=!(a+b);      PIN * INV    1 999 1 0 1 0\n",
+}
+# Which 2-input gates each restricted library is allowed to use (besides inv/buf,
+# which every library keeps so ABC can always realize an inverter).
+_LIB_GATESET = {
+    "and_not":     ["and2"],
+    "or_not":      ["or2"],
+    "and_or_not":  ["and2", "or2"],
+    "nand_not":    ["nand2"],
+    "nor_not":     ["nor2"],
+}
+
+
+def _restricted_genlib_text(library: str) -> Optional[str]:
+    """Build a genlib string containing only the gates allowed by `library`.
+
+    Returns None for an unknown library (caller then falls back to full genlib).
+    Every restricted library includes const0/const1 and inv (so ABC can always
+    realize inverters/constants); only the 2-input gate set is restricted.
+
+    NOTE: 'buf' is intentionally EXCLUDED. The gate-library constraint (e.g.
+    "AND and NOT only") does not allow buffers, and keeping buf in the genlib
+    would let ABC emit buffers that then fail the post-map library check and
+    trigger a redundant re-normalization. Without buf, ABC realizes any needed
+    pass-through via two inverters or direct wiring, keeping the result strictly
+    inside the allowed library.
+    """
+    gates = _LIB_GATESET.get(library)
+    if gates is None:
+        return None
+    body = _GENLIB_HEADER + _GENLIB_GATES["inv"]
+    for g in gates:
+        body += _GENLIB_GATES[g]
+    return body
+
+
+# ---------------------------------------------------------------------------
 # BLIF lowering: IR (with DFFs cut at Q/D) -> combinational BLIF
 # ---------------------------------------------------------------------------
 def _blif_name(net: str) -> str:
@@ -428,20 +479,15 @@ def reduce_depth_abc(
     ir: NetlistIR,
     max_depth: Optional[int] = None,
     recipe: str = "resyn2",
+    library: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Optimize the combinational logic for depth using ABC, rebuild the IR.
 
-    This is the function that fills the stubbed reduce_depth(). It:
-      1. lowers the comb frame to BLIF (DFFs cut)
-      2. runs: source abc.rc; strash; <recipe>; dch; map -D K
-      3. reads optimized gate-level Verilog back and rebuilds comb cells
-      4. keeps every DFF cell exactly as-is
-
-    NOTE: step 3 (reading ABC's mapped output back into this exact IR and
-    re-stitching the DFFs) is the part you will finish tomorrow -- the BLIF
-    lowering, ABC invocation, and stats parsing below are ready. The rebuild
-    is left as a clearly marked TODO because it must match pyv_extractor's
-    naming so the round-trip stays lossless.
+    When `library` is one of the restricted sets (and_not / or_not / and_or_not /
+    nand_not / nor_not), ABC maps onto a genlib containing ONLY those gates, so
+    the depth it reports is already achievable within the required library and no
+    post-hoc decomposition is needed. When `library` is None the full 9-gate
+    genlib is used (original behaviour).
     """
     from eda_transform import _max_depth  # local import to avoid cycle
 
@@ -453,30 +499,76 @@ def reduce_depth_abc(
         src.write_text(ir_to_comb_blif(ir, model="top", preserve_dff_control=True))
 
         k = max_depth if max_depth is not None else 0
-        map_cmd = f"map -D {k}" if k > 0 else "map"
 
         # Source abc.rc for resyn2/dch aliases if provided. Copy resources into
         # the temporary ABC cwd so the ABC command script never depends on an
         # absolute path (or on quoting paths with spaces from PyInstaller _MEIPASS).
         rc_name = _copy_resource_to_workdir(_env_path("ABC_RC_PATH", "abc.rc"), work, "abc.rc")
-        genlib_name = _copy_resource_to_workdir(_env_path("GENLIB_PATH", "my.genlib"), work, "my.genlib")
+
+        # Pick the genlib: restricted set if the task constrains the library,
+        # else the bundled full 9-gate genlib.
+        restricted = _restricted_genlib_text(library) if library else None
+        if restricted is not None:
+            (work / "lib.genlib").write_text(restricted)
+            genlib_name = "lib.genlib"
+        else:
+            genlib_name = _copy_resource_to_workdir(_env_path("GENLIB_PATH", "my.genlib"), work, "my.genlib")
+
         prelude = f"source {rc_name}; " if rc_name else ""
         lib = f"read_library {genlib_name}; " if genlib_name else ""
 
-        script = (
-            f"{prelude}{lib}"
-            f"read {src.name}; strash; print_stats; "
-            f"{recipe}; dch; {map_cmd}; "
-            f"write_verilog out.v; print_stats"
-        )
-        out = _run_abc(script, work)
-        opt_v = work / "out.v"
-        opt_text = opt_v.read_text() if opt_v.exists() else ""
+        # Depth-oriented flow with MULTI-RECIPE best-of selection.
+        # A single recipe (resyn2) sometimes fails to reduce depth on a given
+        # circuit (e.g. test28). Different AIG-optimization scripts reach different
+        # local optima, so we try several, map each with depth-oriented 'if -g',
+        # and keep the candidate with the SMALLEST final depth. Runs comfortably
+        # in the single-threaded 300s budget for these circuits.
+        map_tail = f"if -g; map -D {k}" if k > 0 else "if -g; map"
 
-    # ABC prints stats twice: after strash (before) and after map (after).
-    all_stats = [(int(m.group(1)), int(m.group(2))) for m in _STATS_RE.finditer(out)]
-    abc_depth_before = all_stats[0][1] if all_stats else None
-    gates_after, depth_after = all_stats[-1] if all_stats else (None, None)
+        # Caller may pin a single recipe; otherwise sweep a small portfolio.
+        if recipe and recipe != "resyn2":
+            recipes = [recipe]
+        else:
+            recipes = ["resyn2", "resyn2rs", "compress2rs", "resyn3"]
+
+        abc_depth_before = None
+        best_depth = None
+        best_gates = None
+        best_text = ""
+        best_recipe = None
+        best_out_log = ""
+        for idx, rec in enumerate(recipes):
+            out_name = f"out{idx}.v"
+            script = (
+                f"{prelude}{lib}"
+                f"read {src.name}; strash; print_stats; "
+                f"{rec}; dch; {map_tail}; "
+                f"write_verilog {out_name}; print_stats"
+            )
+            try:
+                out = _run_abc(script, work)
+            except Exception:
+                continue
+            stats = [(int(m.group(1)), int(m.group(2))) for m in _STATS_RE.finditer(out)]
+            if not stats:
+                continue
+            if abc_depth_before is None:
+                abc_depth_before = stats[0][1]
+            cand_gates, cand_depth = stats[-1]
+            cand_path = work / out_name
+            cand_text = cand_path.read_text() if cand_path.exists() else ""
+            if not cand_text:
+                continue
+            if (best_depth is None
+                    or cand_depth < best_depth
+                    or (cand_depth == best_depth and cand_gates < (best_gates or 1 << 30))):
+                best_depth, best_gates = cand_depth, cand_gates
+                best_text, best_recipe, best_out_log = cand_text, rec, out
+
+        opt_text = best_text
+        out = best_out_log
+
+    gates_after, depth_after = best_gates, best_depth
 
     result = {
         "status": "optimized" if opt_text else "kept_original",
@@ -485,8 +577,8 @@ def reduce_depth_abc(
         "target_depth": max_depth,
         "abc_depth_before": abc_depth_before,
         "abc_gates_after": gates_after,
-        "recipe": recipe,
-        "message": out.strip()[:400],
+        "recipe": best_recipe or recipe,
+        "message": (out or "").strip()[:400],
         "_optimized_verilog": opt_text,
     }
     return result
