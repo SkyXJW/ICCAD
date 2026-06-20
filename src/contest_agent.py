@@ -291,7 +291,7 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
             default=_first_value(merged, "max_output_tokens", "max_tokens", default=4096),
         )
     )
-    answer_artifact_threshold = int(_first_value(merged, "answer_artifact_threshold", default=65_536))
+    answer_artifact_threshold = int(_first_value(merged, "answer_artifact_threshold", default=4096))
 
     suite_root = Path(_first_value(merged, "suite_root", "project_root", default=Path.cwd()))
     log_dir = Path(_first_value(merged, "log_dir", "output_dir", default=Path.cwd()))
