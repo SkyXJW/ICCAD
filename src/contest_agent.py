@@ -1997,10 +1997,19 @@ class ContestAgent:
         self.last_tool = None
         self.last_auto_verify_seconds = 0.0
         self.last_auto_equivalence = None
+        self.last_parse_seconds = 0.0
+        self.last_exec_seconds = 0.0
+        self.last_result = None
+        _t_parse = time.perf_counter()
         call = self.parser.parse(request)
+        self.last_parse_seconds = time.perf_counter() - _t_parse  # 前端用时（解析：regex/LLM 路由）
         self.last_tool = call.tool
+        _t_exec = time.perf_counter()
         result = self.execute(call)
         result = self._maybe_auto_verify_transform(call, result)
+        # 后端用时（EDA 工具执行；扣掉 auto-CEC 自检，那部分已单独计入 last_auto_verify_seconds）
+        self.last_exec_seconds = max(0.0, (time.perf_counter() - _t_exec) - self.last_auto_verify_seconds)
+        self.last_result = result
         self._remember_action(call, result)
         answer = render_answer(call, result, request)
         return self.emit_response(answer)
@@ -2308,6 +2317,55 @@ def _time_limit(seconds: int):
     else:
         yield
 
+_BASIC_TASK_TOOLS = {"begin_testcase", "design_load", "design_write"}
+
+
+def _task_type(tool: Optional[str]) -> str:
+    """按工具名前缀把题目归到四类：basic / analysis / transform / optimization。"""
+    if not tool:
+        return "unknown"
+    if tool in _BASIC_TASK_TOOLS:
+        return "basic"
+    if tool.startswith("analysis_") or tool.startswith("verification_"):
+        return "analysis"
+    if tool.startswith("transformation_"):
+        return "transform"
+    if tool.startswith("optimization_"):
+        return "optimization"
+    return "other"
+
+
+def _cost_metric(tool: Optional[str], result: Any) -> str:
+    """优化题的 cost 变化摘要（供人一眼看出优化效果）。非优化题返回空串。"""
+    if not isinstance(result, dict):
+        return ""
+    if tool == "optimization_reduce_depth":
+        o = result.get("original_depth")
+        d = result.get("depth")
+        st = result.get("status", "")
+        if o is not None and d is not None:
+            return f"depth {o}->{d} ({st})"
+        return st
+    if tool and tool.startswith("optimization_"):
+        # 其它优化工具（如合并等价门）：优先报门数变化，退而报状态。
+        if "merged_gates" in result:
+            return f"merged_gates={result.get('merged_gates')} ({result.get('status','')})"
+        if "gate_count" in result:
+            return f"gates={result.get('gate_count')} ({result.get('status','')})"
+        return result.get("status", "")
+    return ""
+
+
+def _equiv_flag(auto_eq: Dict[str, Any]) -> str:
+    """把 auto-CEC 的等价结论转成 YES/NO/空。仅对 transform/optimization 有值。"""
+    eq = (auto_eq or {}).get("equivalent")
+    if eq is True:
+        return "YES"
+    if eq is False:
+        return "NO(=0分,功能被改)"
+    return ""
+
+
 def replay_suite(config: AgentConfig, start: int, end: int, *, suppress_stdout: bool) -> None:
     config.log_dir.mkdir(parents=True, exist_ok=True)
     timing_path = config.log_dir / "timing.csv"
@@ -2331,6 +2389,15 @@ def replay_suite(config: AgentConfig, start: int, end: int, *, suppress_stdout: 
     with answers_path.open("w", newline="") as af:
         writer = csv.writer(af)
         writer.writerow(["case", "prompt_idx", "tool", "status", "answer", "prompt"])
+
+    report_path = config.log_dir / "run_report.csv"
+    with report_path.open("w", newline="") as rf:
+        writer = csv.writer(rf)
+        writer.writerow([
+            "case", "prompt_idx", "task_type", "tool",
+            "front_sec", "back_sec", "total_sec", "status",
+            "equivalent", "cost_metric", "manual_correct", "prompt",
+        ])
 
     for case_num in range(start, end + 1):
         agent = ContestAgent(config, suppress_stdout=suppress_stdout)
@@ -2380,6 +2447,18 @@ def replay_suite(config: AgentConfig, start: int, end: int, *, suppress_stdout: 
             with answers_path.open("a", newline="") as af:
                 writer = csv.writer(af)
                 writer.writerow([f"test{case_num:02d}", idx, tool, status, answer, line])
+            ttype = _task_type(tool)
+            front_sec = getattr(agent, "last_parse_seconds", 0.0)
+            back_sec = getattr(agent, "last_exec_seconds", 0.0)
+            equiv = _equiv_flag(auto_eq) if ttype in ("transform", "optimization") else ""
+            cost_metric = _cost_metric(tool, getattr(agent, "last_result", None))
+            with report_path.open("a", newline="") as rf:
+                writer = csv.writer(rf)
+                writer.writerow([
+                    f"test{case_num:02d}", idx, ttype, tool,
+                    f"{front_sec:.2f}", f"{back_sec:.2f}", f"{front_sec + back_sec:.2f}",
+                    status, equiv, cost_metric, "", line,
+                ])
             if suppress_stdout:
                 auto_note = ""
                 if auto_elapsed:
@@ -2392,6 +2471,7 @@ def replay_suite(config: AgentConfig, start: int, end: int, *, suppress_stdout: 
             print(f"replayed test{case_num:02d}: log={agent.log_path}", flush=True)
     print(f"[timing] per-prompt timing written to {timing_path}", file=sys.stderr)
     print(f"[answers] per-prompt answers written to {answers_path}", file=sys.stderr)
+    print(f"[report] per-prompt run report written to {report_path}", file=sys.stderr)
 
 
 def main() -> None:

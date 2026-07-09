@@ -891,8 +891,13 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
         def _finish_depth_result(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             abc_original_depth = result.get("original_depth")
             abc_depth = result.get("depth")
-            reported_original_depth = _max_depth(snapshot, target) if scope == "cone" and target else _max_depth(snapshot)
-            reported_depth = _max_depth(ir, target) if scope == "cone" and target else _max_depth(ir)
+            # cone 题按目标锥深度判定；design 题按“四类组合帧（含 reg2reg）取最大”的整设计深度判定。
+            # 旧实现 design 分支用 _max_depth(...)（只数设计 PO 端点），对输出全走 DFF 的纯寄存器型
+            # 设计恒为 0/偏小，导致下面的“未变小则回退”闸门恒触发，把 ABC 真做过的 reg2reg 深度优化
+            # 整个丢弃（test23/24/29/30 报 kept_original 即此因）。改用 design_max_logic_depth 后，报数
+            # 与回退判定都按评委实际会量的整设计组合深度进行。
+            reported_original_depth = _max_depth(snapshot, target) if scope == "cone" and target else design_max_logic_depth(snapshot)
+            reported_depth = _max_depth(ir, target) if scope == "cone" and target else design_max_logic_depth(ir)
 
             payload = {
                 **base,
@@ -1399,6 +1404,27 @@ def pi_to_dff_depth(ir: NetlistIR) -> Dict[str, Any]:
             depths.append((cell.name, d, _max_depth(ir, d, graph=graph)))
     max_depth_value = max((depth for _, _, depth in depths), default=0)
     return {"max_depth": max_depth_value, "dff_depths": depths}
+
+
+def design_max_logic_depth(ir: NetlistIR, graph: Optional[nx.DiGraph] = None) -> int:
+    """整设计最大组合逻辑深度（A21.2 / A30 的四类组合帧取最大）。
+
+    端点集 = {设计 PO, DFF.D}，源集 = {设计 PI, DFF.Q}。组合图已把 DFF 切成时序边界，
+    所以对每个端点网调 _max_depth（从其所有祖先——含 PI 与 DFF.Q——求最长深度）即可覆盖：
+      * 设计 PO 端点 -> PI->PO 与 DFF.Q->PO
+      * DFF.D 端点   -> PI->DFF.D 与 DFF.Q->DFF.D（reg2reg）
+    与旧的“只取设计 PO 端点”相比，补上了输出全走 DFF 的纯寄存器型设计的 reg2reg 深度，
+    避免这类设计被误报 0 / 偏小。单次建图，复用 _max_depth 的同一把尺。"""
+    if graph is None:
+        graph = _build_graph(ir)
+    best = _max_depth(ir, graph=graph)  # 设计 PO 端点（覆盖 PI->PO 与 DFF.Q->PO）
+    for cell in ir.cells.values():
+        if cell.cell_type != "dff":
+            continue
+        for pin, net in cell.inputs.items():
+            if pin.upper() == "D":
+                best = max(best, _max_depth(ir, net, graph=graph))
+    return best
 
 
 def outputs_depth_over(ir: NetlistIR, threshold: int) -> Dict[str, Any]:

@@ -29,3 +29,5 @@ __pycache__/
 *.pyc
 *.csv
 cada1078_alpha
+*Zone.Identifier
+__pycache__/

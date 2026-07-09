@@ -738,7 +738,13 @@ def analysis_max_logic_depth(
     design_id: str = "current",
 ) -> Dict[str, Any]:
     session = _get_session(design_id)
-    # whole-design 模式：不指定 target / source 时，统计所有主输出位的最大组合深度。
+    # whole-design 模式：不指定 target / source 时，统计整设计的最大组合深度。
+    # 按 A21.2 / A30 的组合帧定义，端点集是 {PO, DFF.D}、源集是 {PI, DFF.Q}，共四类路径：
+    #   PI->PO / DFF.Q->PO / PI->DFF.D / DFF.Q->DFF.D
+    # 组合图（nx_probe）已把 DFF 切成时序边界（DFF.Q 是源、DFF.D 是汇），所以：
+    #   * 对每个 PO 位调 max_fanin_depth，已覆盖 PI->PO 与 DFF.Q->PO；
+    #   * 对每个 DFF.D 网求深度（复用 pi_to_dff_depth，同一张图、同一边权），覆盖 PI->DFF.D 与 DFF.Q->DFF.D。
+    # 早先只数 PO 端点，导致输出全走 DFF 的“纯寄存器型”设计漏掉 reg2reg 深度、报 0 或偏小。
     if target in (None, "") and source in (None, ""):
         depths: List[Tuple[str, int]] = []
         for name in session.ir.signal_order:
@@ -747,16 +753,34 @@ def analysis_max_logic_depth(
                 continue
             for bit in session.analyzer.signal_bits(name):
                 depths.append((bit, session.analyzer.max_fanin_depth(bit)))
-        depth = max((value for _, value in depths), default=0)
+        po_depth = max((value for _, value in depths), default=0)
+
+        # 终点落在 DFF.D 的两类（含 reg2reg），复用已验证的 pi_to_dff_depth（同尺）。
+        dff_info = pi_to_dff_depth(session.ir)
+        dff_endpoints = [
+            {"endpoint": cell_d, "kind": "dff_d", "depth": d}
+            for cell_d, d in [
+                (item[1], item[2]) for item in dff_info.get("dff_depths", [])
+            ]
+        ]
+        dff_depth = dff_info.get("max_depth", 0)
+
+        depth = max(po_depth, dff_depth)
+        endpoints = (
+            [{"endpoint": output, "kind": "primary_output", "depth": value} for output, value in depths]
+            + dff_endpoints
+        )
         return _ok(
             "analysis_max_logic_depth",
             design_id=session.design_id,
             source=None,
             target=None,
             mode="design",
-            path_exists=bool(depths),
+            path_exists=bool(depths) or bool(dff_endpoints),
             depth=depth,
+            # 兼容旧字段：outputs 仍只列 PO；新增 endpoints 覆盖 {PO, DFF.D} 全部四类帧的端点。
             outputs=[{"output": output, "depth": value} for output, value in depths],
+            endpoints=endpoints,
         )
     if target in (None, ""):
         raise ValueError("analysis_max_logic_depth requires target when source is specified")

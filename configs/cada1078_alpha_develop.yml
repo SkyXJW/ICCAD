@@ -7,18 +7,18 @@ generation:
   max_output_tokens: 4096
 
 openai:
-  api_key: null
+  api_key: sk-4gYeaUItlUsNMudOWnoHObVu1HKRAchbZ15htiEnnvU3OpFi
   model: gpt-4o-mini
 
 anthropic:
   api_key: null
   model: claude-haiku-4-5
 
-base_url: https://oneai.evanora.top/v1
+base_url: https://api.holdai.top/v1
 
 parser: llm
 path_limit: 1000000
 answer_artifact_threshold: 4096 # 回答响应长度阈值，超过该长度则将完整回答写入一个单独的文件，并在回答响应中提供该文件的路径；单位：字符，<=0表示禁用该功能
 yosys_timeout: 240
 llm_review: false
-auto_verify_transforms: false
+auto_verify_transforms: true

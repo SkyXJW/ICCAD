@@ -229,12 +229,21 @@ def check_call(ir, session, tool, args, result, cap):
             if best is None:
                 return ("SKIP", "cyclic")
             mx = 0
+            # 端点集按 A21.2/A30 四类组合帧：{PO, DFF.D}（源集 {PI, DFF.Q} 已由切 DFF 的组合图保证）。
+            # 这里仍是完全独立的复算（自己的一遍全图 DP best[]），不调 agent 的 pi_to_dff_depth。
             for nm in ir.signal_order:
                 if ir.signals[nm].direction == "output":
                     for bit in session.analyzer.signal_bits(nm):
                         nd = ET.net_node(bit)
                         if nd in best:
                             mx = max(mx, best[nd])
+            for cell in ir.cells.values():
+                if cell.cell_type == "dff":
+                    for pin, net in cell.inputs.items():
+                        if pin.upper() == "D":
+                            nd = ET.net_node(net)
+                            if nd in best:
+                                mx = max(mx, best[nd])
             return ("OK", f"{mx}") if got == mx else ("MISMATCH", f"design depth {got}≠{mx}")
         return ("SKIP", f"mode={mode}")
 
@@ -279,6 +288,7 @@ def run_case(case_dir, cap):
     agent = ContestAgent(cfg, suppress_stdout=True)
     findings = []
     orig = agent.execute
+    state = {"idx": 0}
 
     def wrap(call, _o=orig):
         r = _o(call)
@@ -289,11 +299,14 @@ def run_case(case_dir, cap):
                     st, detail = check_call(sess.ir, sess, call.tool, dict(call.arguments), r, cap)
                 except Exception as e:  # noqa
                     st, detail = "SKIP", f"checker-error:{type(e).__name__}"
-                findings.append((call.tool, st, detail))
+                findings.append((state["idx"], call.tool, st, detail))
         return r
 
     agent.execute = wrap
+    idx = 0
     for line in [x for x in (case_dir / "prompt.txt").read_text().splitlines() if x.strip()]:
+        idx += 1
+        state["idx"] = idx
         try:
             agent.process_request(line)
         except Exception:
@@ -301,11 +314,53 @@ def run_case(case_dir, cap):
     return findings
 
 
+import csv as _csv
+import re as _re
+
+
+def _norm_case(name):
+    m = _re.search(r"(\d+)", name)
+    return f"test{int(m.group(1)):02d}" if m else name
+
+
+def _merge_report(report_in, report_out, verdict):
+    """把 {(case, prompt_idx): OK/MISMATCH/SKIP} 并入 run_report.csv 的 analysis_check 列。"""
+    rows = list(_csv.DictReader(open(report_in, encoding="utf-8", errors="replace")))
+    if not rows:
+        return 0
+    fields = list(rows[0].keys())
+    if "analysis_check" not in fields:
+        if "manual_correct" in fields:
+            fields.insert(fields.index("manual_correct"), "analysis_check")
+        else:
+            fields.append("analysis_check")
+    n = 0
+    for r in rows:
+        try:
+            key = (_norm_case(r["case"]), int(r["prompt_idx"]))
+        except Exception:
+            key = None
+        v = verdict.get(key, "")
+        r["analysis_check"] = v
+        if v:
+            n += 1
+    with open(report_out, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--suite-root", default=".")
     ap.add_argument("--only", nargs="*", type=int, default=None)
     ap.add_argument("--path-cap", type=int, default=2_000_000)
+    ap.add_argument("--report", default=None,
+                    help="run_report.csv 路径；给了就把分析题独立复核结论并进去")
+    ap.add_argument("--out", default=None,
+                    help="合并后输出路径（默认在 --report 同名后加 _checked）")
     args = ap.parse_args()
     root = Path(args.suite_root) / "testcase" / "testcase"
     cases = sorted([d for d in root.glob("test*") if d.is_dir()],
@@ -317,6 +372,7 @@ def main():
     tot_ok = tot_mis = tot_skip = 0
     bad = []
     skip_tools = Counter()
+    verdict = {}
     for c in cases:
         try:
             fnd = run_case(c, args.path_cap)
@@ -324,10 +380,13 @@ def main():
             print(f"  {c.name:8s} ! ERROR {type(e).__name__}: {e}")
             bad.append(c.name)
             continue
-        ok = sum(1 for _, s, _ in fnd if s == "OK")
-        mis = [(t, d) for t, s, d in fnd if s == "MISMATCH"]
-        sk = sum(1 for _, s, _ in fnd if s == "SKIP")
-        for t, s, _ in fnd:
+        cn = _norm_case(c.name)
+        for pidx, t, st, _ in fnd:
+            verdict[(cn, pidx)] = st
+        ok = sum(1 for _, _, s, _ in fnd if s == "OK")
+        mis = [(t, d) for _, t, s, d in fnd if s == "MISMATCH"]
+        sk = sum(1 for _, _, s, _ in fnd if s == "SKIP")
+        for _, t, s, _ in fnd:
             if s == "SKIP":
                 skip_tools[t] += 1
         tot_ok += ok; tot_mis += len(mis); tot_skip += sk
@@ -347,6 +406,10 @@ def main():
         print(f"  ⚠ 需检查: {', '.join(bad)}")
     else:
         print(f"  所有可独立复核的分析回答：计算值正确 ✓")
+    if args.report:
+        out = args.out or (str(args.report).rsplit(".", 1)[0] + "_checked.csv")
+        n = _merge_report(args.report, out, verdict)
+        print(f"  已把分析题独立复核结论并入 {out}（填了 {n} 行 analysis_check）")
     return 1 if tot_mis else 0
 
 
