@@ -160,6 +160,11 @@ class AgentConfig:
     llm_review: bool = False
     auto_verify_transforms: bool = False
     allow_absolute_output_paths: bool = False
+    # OpenAI structured-outputs strict mode for function calling. OFF by default:
+    # enum/required in the tool schema are already honored as strong constraints by
+    # both gpt-4o-mini and claude-haiku without this. Turn on (fc_strict: true) only
+    # after validating against the live API on the VM.
+    fc_strict: bool = False
 
 
 def _strip_quotes(value: str) -> str:
@@ -314,6 +319,7 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
         llm_review=_as_bool(_first_value(merged, "llm_review", "llm_self_check", "llm_judge", default=False)),
         auto_verify_transforms=_as_bool(_first_value(merged, "auto_verify_transforms", default=False)),
         allow_absolute_output_paths=_as_bool(_first_value(merged, "allow_absolute_output_paths", default=False)),
+        fc_strict=_as_bool(_first_value(merged, "fc_strict", default=False)),
     )
 
 
@@ -584,8 +590,40 @@ def _describe_tools(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
     return compact
 
 
-def _tools_for_openai(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build the ``tools`` list in OpenAI Function Calling format."""
+def _strictify_schema(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform a parameters schema into an OpenAI structured-outputs *strict*
+    compliant one: drop the internal ``design_id``, set ``additionalProperties:false``,
+    strip unsupported ``default`` keywords, and list every remaining property in
+    ``required`` (originally-optional props are made nullable via a ["<type>","null"]
+    union). Only used when fc_strict is enabled."""
+    props = dict((params.get("properties") or {}))
+    props.pop("design_id", None)
+    orig_required = set(params.get("required") or [])
+    new_props: Dict[str, Any] = {}
+    for name, spec in props.items():
+        spec = {k: v for k, v in dict(spec).items() if k != "default"}
+        if name not in orig_required:
+            t = spec.get("type", "string")
+            if isinstance(t, str):
+                spec["type"] = [t, "null"]
+            elif isinstance(t, list) and "null" not in t:
+                spec["type"] = t + ["null"]
+        new_props[name] = spec
+    return {
+        "type": "object",
+        "properties": new_props,
+        "required": list(new_props.keys()),
+        "additionalProperties": False,
+    }
+
+
+def _tools_for_openai(tool_contract: Dict[str, Any], strict: bool = False) -> List[Dict[str, Any]]:
+    """Build the ``tools`` list in OpenAI Function Calling format.
+
+    When ``strict`` is True, emit structured-outputs strict schemas (hard schema
+    adherence, including enums). Otherwise emit the plain schema, whose enum/required
+    are still honored as strong constraints by the model.
+    """
     compact = _describe_tools(tool_contract)
     fc_tools: List[Dict[str, Any]] = []
     for item in compact:
@@ -605,16 +643,14 @@ def _tools_for_openai(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
             ]
             if required:
                 params["required"] = required
-        fc_tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": item["name"],
-                    "description": fc_desc,
-                    "parameters": params,
-                },
-            }
-        )
+        function_obj: Dict[str, Any] = {
+            "name": item["name"],
+            "description": fc_desc,
+            "parameters": _strictify_schema(params) if strict else params,
+        }
+        if strict:
+            function_obj["strict"] = True
+        fc_tools.append({"type": "function", "function": function_obj})
     return fc_tools
 
 
@@ -777,7 +813,7 @@ class RequestParser:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.tool_contract = load_tool_contract(config.suite_root)
-        self.tools_openai = _tools_for_openai(self.tool_contract)
+        self.tools_openai = _tools_for_openai(self.tool_contract, strict=getattr(config, "fc_strict", False))
         self.tools_anthropic = _tools_for_anthropic(self.tool_contract)
         self.system_prompt = build_llm_system_prompt(self.tool_contract)
         self.review_prompt = build_llm_review_prompt(self.tool_contract)
@@ -832,7 +868,8 @@ class RequestParser:
         call = ToolCall(tool=tool, arguments=args, source="llm")
         if self.config.llm_review:
             call = self._review_llm_call(request, call)
-        return self._repair_llm_call(request, call)
+        call = self._repair_llm_call(request, call)
+        return self._normalize_llm_call(request, call)
 
     def _review_llm_call(self, request: str, call: ToolCall) -> ToolCall:
         user = json.dumps(
@@ -992,6 +1029,83 @@ class RequestParser:
                 args["from_gate"] = str(args["from_gate"]).lower().removesuffix("2")
             if args != call.arguments:
                 return repaired(call.tool, args)
+        return call
+
+    # Canonical enum-value aliases: snap common near-misses from the model to the
+    # exact tokens the backend accepts. Phrasing-independent (keyed on the value the
+    # model emitted, not on public prompt wording), so it generalizes to rephrasings.
+    _LIB_ALIAS = {
+        "nand_only": "nand_not", "nor_only": "nor_not", "and_only": "and_not",
+        "or_only": "or_not", "nandnot": "nand_not", "nornot": "nor_not",
+        "andnot": "and_not", "ornot": "or_not", "andornot": "and_or_not",
+        "and_or": "and_or_not",
+    }
+
+    def _normalize_llm_call(self, request: str, call: ToolCall) -> ToolCall:
+        """Validity-based (not phrasing-based) backfill for LLM tool calls.
+
+        Complements the schema enums: (1) snaps near-miss enum values to the exact
+        tokens the backend accepts, and (2) backfills a missing cone `target` from
+        'cone of X' wording — which fixes the class of failures where a dropped
+        target/scope makes reduce_depth run on an empty scope and spin
+        (kept_original). Only fills/normalizes; never overrides a value the model
+        already set to a valid token. Runs only on the LLM path, so it cannot affect
+        the regex fast path or the public-set results.
+        """
+        text = request.strip()
+        lower = text.lower()
+        args = dict(call.arguments)
+        changed = False
+
+        # (1) Enum-value normalization.
+        if isinstance(args.get("to_library"), str):
+            v = args["to_library"].strip().lower().replace(" ", "_").replace("+", "_")
+            v = self._LIB_ALIAS.get(v, v)
+            if v != args.get("to_library"):
+                args["to_library"] = v
+                changed = True
+        for key in ("from_gate", "gate_type"):
+            if isinstance(args.get(key), str):
+                v = args[key].strip().lower()
+                if v.endswith("2") and v[:-1] in {"and", "or", "nand", "nor", "xor", "xnor"}:
+                    v = v[:-1]
+                if v != args.get(key):
+                    args[key] = v
+                    changed = True
+        if isinstance(args.get("scope"), str):
+            v = args["scope"].strip().lower()
+            if v in {"whole", "whole_design", "full", "full_design", "netlist", "all", "global"}:
+                v = "design"
+            if v != args.get("scope"):
+                args["scope"] = v
+                changed = True
+        if isinstance(args.get("constant"), str):
+            v = args["constant"].strip().lower()
+            if v in {"0", "1'b0", "b0", "1b0"}:
+                v = "1'b0"
+            elif v in {"1", "1'b1", "b1", "1b1"}:
+                v = "1'b1"
+            if v != args.get("constant"):
+                args["constant"] = v
+                changed = True
+
+        # (2) Cone-target backfill for cone-oriented tools.
+        if call.tool in {"optimization_reduce_depth", "transformation_replace_gate_library"}:
+            mentions_cone = ("cone of" in lower) or (str(args.get("scope", "")).lower() == "cone")
+            has_target = bool(str(args.get("target", "")).strip())
+            if mentions_cone and not has_target:
+                m = re.search(
+                    r"(?:logic cone of|fanin cone of|cone of output|cone of)\s+([^\s,.;:]+)",
+                    text,
+                    flags=re.I,
+                )
+                if m:
+                    args["target"] = _strip_quotes(m.group(1))
+                    args["scope"] = "cone"
+                    changed = True
+
+        if changed:
+            return ToolCall(call.tool, args, call.source)
         return call
 
     def _call_openai(self, system: str, user: str, *, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:

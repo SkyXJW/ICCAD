@@ -524,12 +524,49 @@ def reduce_depth_abc(
         # and keep the candidate with the SMALLEST final depth. Runs comfortably
         # in the single-threaded 300s budget for these circuits.
         map_tail = f"if -g; map -D {k}" if k > 0 else "if -g; map"
+        # Iterated depth push: a second global-delay restructuring + depth map
+        # round often peels extra levels on unconstrained cases (test22/23/24),
+        # where a single pass leaves ABC 2-5 levels behind DC.
+        map_iter = (
+            f"dch -f; if -g; map -D {k}; st; dch -f; if -g; map -D {k}"
+            if k > 0 else
+            "dch -f; if -g; map; st; dch -f; if -g; map"
+        )
+        # v2: an even deeper 3-round iterate for the last levels on the cases that
+        # were still 1-6 behind DC (test22/24/26/28).
+        map_iter3 = (
+            f"dch -f; if -g; map -D {k}; st; dch -f; if -g; map -D {k}; st; dch -f; if -g; map -D {k}"
+            if k > 0 else
+            "dch -f; if -g; map; st; dch -f; if -g; map; st; dch -f; if -g; map"
+        )
 
-        # Caller may pin a single recipe; otherwise sweep a small portfolio.
+        # Candidate opt-scripts (the middle of the ABC run). Each yields one
+        # mapped netlist; we keep the SMALLEST-depth (then smallest-gate) result.
+        # The first four are the ORIGINAL portfolio, kept byte-for-byte so every
+        # case already won reproduces exactly. The rest are stronger, iterated
+        # depth pushers ADDED to the best-of pool: because selection is best-of
+        # AND each run is wrapped in try/except, adding candidates can only lower
+        # or hold the depth, never raise it -- cases ABC already wins cannot
+        # regress, and a candidate using a command absent in this ABC build is
+        # simply skipped.
         if recipe and recipe != "resyn2":
-            recipes = [recipe]
+            candidates = [f"{recipe}; dch; {map_tail}"]
         else:
-            recipes = ["resyn2", "resyn2rs", "compress2rs", "resyn3"]
+            candidates = [
+                # --- original portfolio (byte-for-byte, reproduces v0 results) ---
+                f"resyn2; dch; {map_tail}",
+                f"resyn2rs; dch; {map_tail}",
+                f"compress2rs; dch; {map_tail}",
+                f"resyn3; dch; {map_tail}",
+                # --- v1 iterated pushers ---
+                f"resyn2; resyn2; {map_iter}",
+                f"compress2rs; resyn2; {map_iter}",
+                f"dc2; {map_iter}",
+                # --- v2 push-to-the-limit (deeper iterate + GIA '&' engines) ---
+                f"resyn2; resyn2; resyn2; {map_iter3}",
+                f"dc2; dc2; {map_iter3}",
+                f"&get -n; &dch -f; &if -g -K 6; &put; {map_iter}",
+            ]
 
         abc_depth_before = None
         best_depth = None
@@ -537,12 +574,12 @@ def reduce_depth_abc(
         best_text = ""
         best_recipe = None
         best_out_log = ""
-        for idx, rec in enumerate(recipes):
+        for idx, rec in enumerate(candidates):
             out_name = f"out{idx}.v"
             script = (
                 f"{prelude}{lib}"
                 f"read {src.name}; strash; print_stats; "
-                f"{rec}; dch; {map_tail}; "
+                f"{rec}; "
                 f"write_verilog {out_name}; print_stats"
             )
             try:
