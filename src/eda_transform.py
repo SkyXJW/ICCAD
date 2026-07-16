@@ -36,7 +36,31 @@ class IRWriter:
         rn = self._safe_names()
         em = lambda x: rn.get(x, x)
         lines: List[str] = []
-        lines.extend(self._dff_model())
+        # 【禁止】在这里写 dff 的行为级模型。2026-07-16 移除，原因如下：
+        #
+        # 原实现是 `lines.extend(self._dff_model())`，无条件在每个输出文件开头插入
+        #     module dff(input RN, input SN, input CK, input D, output reg Q);
+        #       always @(posedge CK or negedge RN) ... Q <= D; end
+        #     endmodule
+        # 于是我们写出的每一个 <case>_out.v 都是【两个模块、dff 排在 top 前面、
+        # 含 always/output reg/posedge/<= 这些行为级 RTL】。这一次踩穿三条硬规定：
+        #   * 3.2.a "a flattened netlist ... without hierarchy (one top module only)"
+        #     -> 我们交了两个模块；
+        #   * 3.2.a 允许的构造只有 8 个原语 + dff + wire + 常量
+        #     -> 我们塞了行为级 RTL；
+        #   * A5.4 "The DFF will appear as a primitive gate in the input Verilog file"
+        #     -> 官方把 dff 当原语，我们却给了它一个模块定义。
+        #
+        # Alpha 实测代价：40 题里 38 题 SYNTAX_ERROR、2 题 INCOMPLETE；
+        # 60 条变换题 + 15 条优化题 + 40 条 write 题全部 0 分（判分要打开这个文件做
+        # CEC / 查硬约束 / 量 cost），连 test01 这种"只 load 再 write"的题都挂。
+        #
+        # 为什么本地一直看不见：pyv_extractor.py 里有两处硬编码
+        # `if name == "dff": continue`（第 862 行 regex 快路径、第 918 行 pyverilog
+        # 路径），专门跳过我们自己写进去的这块脏东西 —— 于是 verify_equiv 一直报
+        # PASS=40。官方的读取器没有这个特例。
+        #
+        # 结论：输出文件必须与【输入文件同形】——单模块、dff 当原语、纯门级。
         ports = ", ".join(em(pp) for pp in self.ir.port_order)
         lines.append(f"module {self.ir.module_name}({ports});")
 
@@ -120,19 +144,6 @@ class IRWriter:
         if sig.width == 1:
             return ""
         return f"[{sig.msb}:{sig.lsb}] "
-
-    @staticmethod
-    def _dff_model() -> List[str]:
-        return [
-            "module dff(input RN, input SN, input CK, input D, output reg Q);",
-            "  always @(posedge CK or negedge RN) begin",
-            "    if (!RN) Q <= 1'b0;",
-            "    else if (!SN) Q <= 1'b1;",
-            "    else Q <= D;",
-            "  end",
-            "endmodule",
-            "",
-        ]
 
     @staticmethod
     def _chunks(items: List[str], size: int) -> Iterable[List[str]]:
