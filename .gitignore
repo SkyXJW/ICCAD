@@ -31,3 +31,7 @@ __pycache__/
 cada1078_alpha
 *Zone.Identifier
 __pycache__/
+*Identifier*
+__pycache__/
+*.pyc
+runs/

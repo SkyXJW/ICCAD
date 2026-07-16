@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -76,6 +77,35 @@ def _env_path(env_name: str, bundled_name: str) -> Optional[Path]:
 
 def _abc_timeout() -> int:
     return int(os.environ.get("ABC_TIMEOUT", "120"))
+
+
+# best-of 候选循环的墙钟预算（秒）。
+#
+# 赛题 3.1 / Q&A A18 / A21.5 三处口径一致：非基本操作每条 prompt 限 300 秒。
+# 候选池从 4 扩到 10 之后（2026-07-10，换来 6 降 3 平、7/9 追平反超 DC），每条优化
+# prompt 的耗时线性上涨。实测 test33#19（64,430 门）：
+#     v01(4 候选) 86.7s -> v02 183.5s -> v03 263.9s -> 2026-07-15 389.6s
+# 同一份代码、同一份输入，两次运行相差 48%（机器负载/散热）。也就是说这条题过不过
+# 300 秒红线取决于当天机器的心情；v09_llm 那趟的 327s 已经实打实违规（status 却是
+# ok —— 本地 watchdog 是 600s，只有 timing.csv 的 over_spec 列会说实话）。
+#
+# best-of 的语义本来就是「取跑出来的最好的那个」，因此中途停下只是候选少几个：
+# 结果只会不如满跑，绝不会比不做更差，也不可能违反任何硬约束（CEC 与「未变小则回退」
+# 闸门都在下游，与本预算正交）。
+#
+# 设 0 或负数 = 不限（完全恢复扩池后的旧行为）。默认 240s，给 blif 写出、deepcopy
+# 快照、rebuild、CEC 留出余量（它们都不在本预算内）。
+_DEFAULT_BESTOF_BUDGET_SEC = 240.0
+
+
+def _bestof_budget() -> float:
+    raw = os.environ.get("ABC_BESTOF_BUDGET_SEC", "").strip()
+    if not raw:
+        return _DEFAULT_BESTOF_BUDGET_SEC
+    try:
+        return float(raw)
+    except ValueError:
+        return _DEFAULT_BESTOF_BUDGET_SEC
 
 
 def _bundled_eda_bin(name: str) -> Optional[str]:
@@ -167,20 +197,28 @@ def _restricted_genlib_text(library: str) -> Optional[str]:
     """Build a genlib string containing only the gates allowed by `library`.
 
     Returns None for an unknown library (caller then falls back to full genlib).
-    Every restricted library includes const0/const1 and inv (so ABC can always
-    realize inverters/constants); only the 2-input gate set is restricted.
+    Every restricted library includes const0/const1, inv AND buf.
 
-    NOTE: 'buf' is intentionally EXCLUDED. The gate-library constraint (e.g.
-    "AND and NOT only") does not allow buffers, and keeping buf in the genlib
-    would let ABC emit buffers that then fail the post-map library check and
-    trigger a redundant re-normalization. Without buf, ABC realizes any needed
-    pass-through via two inverters or direct wiring, keeping the result strictly
-    inside the allowed library.
+    关于 buf（2026-07 修正，实测推翻了原先的假设）：
+    原实现把 buf 故意排除在 genlib 之外，注释称 "ABC 会用两级反相器或直接连线实现
+    pass-through，从而保证结果严格落在受限门库内"。**该假设是错的。**
+    实测（test28, and_not）：当某个组合帧输出（这里是若干 DFF 的 D 端）在优化后
+    等价于一个 PI(直通) 时，genlib 里没有 buf，ABC 既不会用两级反相器、也不会直接连线，
+    而是把该输出**留成悬空**（write_verilog 里只在端口列表出现、无任何门驱动、也无 assign）。
+    读回 IR 后这些网没有驱动 -> ABC 在 CEC 时给悬空网补常量 0 -> 功能改变 -> 判不等价
+    -> 整个优化被回滚（test28 报 65->65 kept_original 即此因；实测 5 个悬空端点）。
+
+    因此这里把 buf 放回 genlib：它只用于让 ABC 有能力**表达** pass-through。
+    读回时 rebuild_comb_from_abc() 会用网络别名把 buf 全部消掉（见该函数），
+    所以最终网表里不会残留 buf，门库约束依旧严格满足。
+    实测 test28：加 buf 后悬空端点 5 -> 1（仅剩原网表自带的 floating PO n10，
+    snapshot 侧同样悬空，两边一致故 CEC 通过），CEC 由 not_equivalent 变 equivalent，
+    深度 135 -> 56。
     """
     gates = _LIB_GATESET.get(library)
     if gates is None:
         return None
-    body = _GENLIB_HEADER + _GENLIB_GATES["inv"]
+    body = _GENLIB_HEADER + _GENLIB_GATES["inv"] + _GENLIB_GATES["buf"]
     for g in gates:
         body += _GENLIB_GATES[g]
     return body
@@ -574,7 +612,25 @@ def reduce_depth_abc(
         best_text = ""
         best_recipe = None
         best_out_log = ""
+
+        # 墙钟预算（见 _bestof_budget 的说明）。不变量：
+        #   1) 第一个候选永远跑完 —— 一个结果都没有比候选少几个糟糕得多；
+        #   2) 只在「已经握着一个可用结果」时才提前收工；
+        #   3) 用已跑候选的最大耗时预估下一个，装不下就不开工（而不是开了再被砍），
+        #      这样总耗时才真的被 budget 兜住，而不是 budget + 一个候选的时长。
+        _budget = _bestof_budget()
+        _t_pool = time.monotonic()
+        _cand_secs: List[float] = []
+        _ran = 0
+        _stopped_early = False
+
         for idx, rec in enumerate(candidates):
+            if _budget > 0 and best_text and _cand_secs:
+                _elapsed = time.monotonic() - _t_pool
+                _est_next = max(_cand_secs)  # 保守估计：按最慢的那个算
+                if _elapsed + _est_next > _budget:
+                    _stopped_early = True
+                    break
             out_name = f"out{idx}.v"
             script = (
                 f"{prelude}{lib}"
@@ -582,10 +638,15 @@ def reduce_depth_abc(
                 f"{rec}; "
                 f"write_verilog {out_name}; print_stats"
             )
+            _t_cand = time.monotonic()
             try:
                 out = _run_abc(script, work)
             except Exception:
                 continue
+            finally:
+                # 失败/超时的候选同样消耗了墙钟，必须计入预估。
+                _cand_secs.append(time.monotonic() - _t_cand)
+                _ran += 1
             stats = [(int(m.group(1)), int(m.group(2))) for m in _STATS_RE.finditer(out)]
             if not stats:
                 continue
@@ -604,6 +665,7 @@ def reduce_depth_abc(
 
         opt_text = best_text
         out = best_out_log
+        _pool_seconds = time.monotonic() - _t_pool
 
     gates_after, depth_after = best_gates, best_depth
 
@@ -615,6 +677,12 @@ def reduce_depth_abc(
         "abc_depth_before": abc_depth_before,
         "abc_gates_after": gates_after,
         "recipe": best_recipe or recipe,
+        # best-of 诊断：跑了几个候选 / 是否因预算提前收工 / 候选池总耗时。
+        # 只是记录，不参与任何判断。
+        "bestof_candidates_total": len(candidates),
+        "bestof_candidates_run": _ran,
+        "bestof_stopped_early": _stopped_early,
+        "bestof_seconds": round(_pool_seconds, 2),
         "message": (out or "").strip()[:400],
         "_optimized_verilog": opt_text,
     }
@@ -630,6 +698,11 @@ _ABC_CELL_TO_TYPE = {
     "xor2": "xor", "xnor2": "xnor", "inv": "not", "buf": "buf",
     # some genlibs name the buffer differently:
     "buff": "buf", "not1": "not",
+    # genlib 的常量单元（_GENLIB_HEADER 里始终提供）。它们不是 IR 的 cell_type，
+    # 用哨兵类型透传给 rebuild_comb_from_abc()，由它把消费者直接接到 1'b0/1'b1。
+    # 旧实现没有这两项 -> ABC 一旦真的吐出 zero/one，解析器会静默跳过 ->
+    # 该网失去驱动 -> 悬空 -> CEC 补常量0 -> 不等价 -> 优化被回滚（与 buf 同一类雷）。
+    "zero": "__const0__", "one": "__const1__",
 }
 
 _INST_RE = re.compile(
@@ -680,6 +753,21 @@ def parse_abc_verilog(text: str) -> Tuple[List[Dict[str, Any]], str]:
     return cells, module_name
 
 
+def _design_output_bits(ir: NetlistIR) -> set:
+    """设计主输出的 bit-net 名集合（这些网必须有驱动，不能靠别名消掉）。"""
+    bits = set()
+    for sig in ir.signals.values():
+        if sig.direction != "output":
+            continue
+        if sig.width == 1:
+            bits.add(sig.name)
+        else:
+            lo, hi = min(sig.msb, sig.lsb), max(sig.msb, sig.lsb)
+            for i in range(lo, hi + 1):
+                bits.add(f"{sig.name}[{i}]")
+    return bits
+
+
 def rebuild_comb_from_abc(ir: NetlistIR, abc_verilog: str) -> Dict[str, Any]:
     """Replace the IR's combinational cells with ABC's optimized gates.
 
@@ -689,10 +777,59 @@ def rebuild_comb_from_abc(ir: NetlistIR, abc_verilog: str) -> Dict[str, Any]:
 
     IMPORTANT: this mutates ``ir`` in place and calls rebuild_indices().
     Validate with cec_equivalent(ir, original) right after calling this.
+
+    buf / 常量单元的消解（2026-07 新增）：
+    genlib 里提供 buf 与 zero/one，只是为了让 ABC 有能力**表达** "某输出直通某个 PI"
+    或 "某输出恒为常量"（否则 ABC 会把该输出留成悬空，见 _restricted_genlib_text 的说明）。
+    但受限门库题（如 "AND and NOT only"）不允许最终网表里出现 buf。
+    因此这里在读回时就把它们消解掉，最终网表只含真正的逻辑门：
+      * buf(dst <- src)：dst 不是设计 PO -> 网络别名，把所有消费者（含 DFF 引脚）
+        直接重连到 src，buf 本身丢弃 —— 不加门、不加深度。
+      * zero/one(dst)：dst 不是设计 PO -> 消费者直接接 1'b0 / 1'b1。
+      * dst 是设计 PO（必须有驱动，不能只做别名）：
+          - 直通 -> 用两级 NOT 实现（NOT 在所有受限库与全库中均合法）；
+          - 常量 -> 用一级 NOT 取反相反的常量实现。
+        这两种情况只影响极少数网（test28 实测仅 1 个 buf），深度代价可忽略。
     """
     new_cells, _ = parse_abc_verilog(abc_verilog)
 
-    # 1. keep DFFs, drop all combinational cells
+    # ---- 1. 先把 buf / 常量单元挑出来，建立别名表与常量表（不进 IR）
+    alias: Dict[str, str] = {}      # dst -> src（直通）
+    const_of: Dict[str, str] = {}   # dst -> "1'b0" / "1'b1"
+    gate_cells: List[Dict[str, Any]] = []
+    for c in new_cells:
+        ctype = c["type"]
+        if ctype == "__const0__":
+            const_of[c["output"]] = "1'b0"
+        elif ctype == "__const1__":
+            const_of[c["output"]] = "1'b1"
+        elif ctype == "buf":
+            src = next(iter(c["inputs"].values()), None)
+            if src is not None:
+                alias[c["output"]] = src
+        else:
+            gate_cells.append(c)
+
+    def resolve(net: str) -> str:
+        """顺着别名链走到真正的驱动源（可能落到常量）。"""
+        seen = set()
+        while True:
+            if net in const_of:
+                return const_of[net]
+            if net in alias and net not in seen:
+                seen.add(net)
+                net = alias[net]
+                continue
+            return net
+
+    # ---- 2. 保留 DFF，清掉旧的组合 cell
+    # 先记录"替换前哪些网是有驱动的"。原始网表允许存在 floating PO（A5.6 明确说明会有
+    # floating / unconnected ports，如 test28 的 n10、test25 的 n13[0..3]）。这些 PO 必须
+    # 保持悬空：若给它们凭空补一个驱动（哪怕是常量 0），功能就被改变了。
+    # 注意 ABC 的 cec 会给两边的悬空网都补常量 0，因此它看不出这种差别；只有独立的
+    # verify_equiv（拿 _out.v 与原始 .v 直接仿真）才会抓到。故这里必须自己守住。
+    driven_before = {net for c in ir.cells.values() for net in c.outputs.values()}
+
     dff_names = [n for n in ir.cell_order if ir.cells[n].cell_type == "dff"]
     dff_cells = {n: ir.cells[n] for n in dff_names}
 
@@ -702,24 +839,29 @@ def rebuild_comb_from_abc(ir: NetlistIR, abc_verilog: str) -> Dict[str, Any]:
         ir.cells[n] = dff_cells[n]
         ir.cell_order.append(n)
 
-    # 2. add ABC's combinational gates, declaring any unseen internal wires
     known_nets = set(ir.nets)
+
+    def _declare(net: str) -> None:
+        if net in CONSTANTS:
+            return
+        if net not in known_nets and "[" not in net:
+            ir.add_signal(net, "wire")
+            known_nets.add(net)
+
+    # ---- 3. 加入 ABC 的逻辑门（输入端顺着别名/常量解析）
     added = 0
-    for c in new_cells:
+    for c in gate_cells:
         out = c["output"]
-        # declare any net ABC invented (e.g. new_n219) as a scalar wire
-        for net in [out, *c["inputs"].values()]:
-            if net in CONSTANTS:
-                continue
-            if net not in known_nets and "[" not in net:
-                ir.add_signal(net, "wire")
-                known_nets.add(net)
+        ins = {pin: resolve(net) for pin, net in c["inputs"].items()}
+        _declare(out)
+        for net in ins.values():
+            _declare(net)
 
         port_order = ["Y", "A"] if c["type"] in ("buf", "not") else ["Y", "A", "B"]
         cell = Cell(
             name=c["inst"],
             cell_type=c["type"],
-            inputs=c["inputs"],
+            inputs=ins,
             outputs={"Y": out},
             port_order=port_order,
             src="abc-mapped",
@@ -732,8 +874,58 @@ def rebuild_comb_from_abc(ir: NetlistIR, abc_verilog: str) -> Dict[str, Any]:
         ir.add_cell(cell)
         added += 1
 
+    # ---- 4. DFF 引脚同样顺着别名/常量重连（这一步修好了 test28：
+    #        原先 DFF.D 指向的网因 buf 被丢弃而悬空 -> 补常量0 -> CEC 不等价）
+    for name in dff_names:
+        cell = ir.cells[name]
+        for pin, net in list(cell.inputs.items()):
+            r = resolve(net)
+            if r != net:
+                _declare(r)
+                cell.inputs[pin] = r
+
+    # ---- 5. 设计 PO 必须有真实驱动，不能只做别名 -> 用 NOT 门兑现
+    #        例外：替换前就没有驱动的 PO（原网表自带的 floating port）保持悬空，
+    #        绝不能凭空补驱动，否则功能改变（test28 n10 / test25 n13[*] 即此坑）。
+    po_bits = _design_output_bits(ir)
+    fixed_po = 0
+    kept_floating = 0
+
+    # sorted()（2026-07 新增）：_design_output_bits 返回 set，而 CPython 默认开启 str hash
+    # 随机化(PYTHONHASHSEED=random)，直接迭代 set 会让下面这些修复门的编号在不同进程间漂移
+    # ——同一份输入两次运行会写出门名/顺序不同的 _out.v。功能与门数、深度都不受影响，
+    # 但赛题第 1 节明确要求 deterministic 行为，且这会给逐格比对制造噪声。固定顺序即可。
+    for po in sorted(po_bits):
+        if po not in driven_before:
+            kept_floating += 1
+            continue  # 原本就是 floating PO -> 保持悬空
+        r = resolve(po)
+        if r == po:
+            continue  # 未被别名/常量化：已有门驱动
+        if r in CONSTANTS:
+            # 常量 PO：not(相反常量) -> 目标常量
+            opposite = "1'b1" if r == "1'b0" else "1'b0"
+            ir.add_cell(Cell(name=f"abc_po_const_{fixed_po}", cell_type="not",
+                             inputs={"A": opposite}, outputs={"Y": po},
+                             port_order=["Y", "A"], src="abc-po-fix"))
+        else:
+            # 直通 PO：两级 NOT（保持门库合规，不引入 buf）
+            mid = f"abc_po_buf_{fixed_po}"
+            ir.add_signal(mid, "wire")
+            known_nets.add(mid)
+            _declare(r)
+            ir.add_cell(Cell(name=f"abc_po_inv_a_{fixed_po}", cell_type="not",
+                             inputs={"A": r}, outputs={"Y": mid},
+                             port_order=["Y", "A"], src="abc-po-fix"))
+            ir.add_cell(Cell(name=f"abc_po_inv_b_{fixed_po}", cell_type="not",
+                             inputs={"A": mid}, outputs={"Y": po},
+                             port_order=["Y", "A"], src="abc-po-fix"))
+        fixed_po += 1
+
     ir.rebuild_indices()
-    return {"comb_cells_added": added, "dffs_preserved": len(dff_names)}
+    return {"comb_cells_added": added, "dffs_preserved": len(dff_names),
+            "bufs_aliased": len(alias), "consts_resolved": len(const_of),
+            "po_drivers_fixed": fixed_po, "po_kept_floating": kept_floating}
 
 
 # ---------------------------------------------------------------------------

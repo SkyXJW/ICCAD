@@ -1,1425 +1,1448 @@
 {
- "version": "0.1",
- "purpose": "MCP-ready EDA analysis and verification tool contract for ICCAD Problem A.",
- "state_model": {
-  "design_id": "Tools operate on a server-side loaded design. design_load stores the design under design_id; other tools default to design_id='current'."
- },
- "common_notes": [
-  "Net and signal names must be passed exactly as they appear in the netlist or prompt, including bus bits such as n0[1].",
-  "Path and depth analysis are combinational. DFFs are treated as boundaries by the graph builder.",
-  "For current analysis-only cases, design_write emits an unchanged copy of the loaded design."
- ],
- "tools": [
-  {
-   "name": "design_load",
-   "category": "design",
-   "description": "Load a flattened gate-level Verilog netlist into the server-side current design state.",
-   "when_to_use": "Use first for every testcase, before analysis or verification tools.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "netlist_path": {
-      "type": "string",
-      "description": "Path to the Verilog netlist file."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current",
-      "description": "Server-side design handle."
-     },
-     "miter_dir": {
-      "type": "string",
-      "description": "Optional directory for generated Yosys miter files."
-     },
-     "yosys_timeout": {
-      "type": "integer",
-      "default": 240,
-      "description": "Timeout in seconds for each Yosys SAT query."
-     }
-    },
-    "required": [
-     "netlist_path"
-    ]
-   },
-   "returns": {
-    "ok": "boolean",
-    "design_id": "string",
-    "module": "string",
-    "signal_count": "integer",
-    "net_count": "integer",
-    "cell_count": "integer",
-    "port_order": "array[string]"
-   }
+  "version": "0.1",
+  "purpose": "MCP-ready EDA analysis and verification tool contract for ICCAD Problem A.",
+  "state_model": {
+    "design_id": "Tools operate on a server-side loaded design. design_load stores the design under design_id; other tools default to design_id='current'."
   },
-  {
-   "name": "design_write",
-   "category": "design",
-   "description": "Write the current design to a Verilog file.",
-   "when_to_use": "Use when the request asks to write/output the current design.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "output_path": {
-      "type": "string",
-      "description": "Path where the output netlist should be written."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
+  "common_notes": [
+    "Net and signal names must be passed exactly as they appear in the netlist or prompt, including bus bits such as n0[1].",
+    "Path and depth analysis are combinational. DFFs are treated as boundaries by the graph builder.",
+    "For current analysis-only cases, design_write emits an unchanged copy of the loaded design."
+  ],
+  "tools": [
+    {
+      "name": "design_load",
+      "category": "design",
+      "description": "Load a flattened gate-level Verilog netlist into the server-side current design state.",
+      "when_to_use": "Use first for every testcase, before analysis or verification tools.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "netlist_path": {
+            "type": "string",
+            "description": "Path to the Verilog netlist file."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current",
+            "description": "Server-side design handle."
+          },
+          "miter_dir": {
+            "type": "string",
+            "description": "Optional directory for generated Yosys miter files."
+          },
+          "yosys_timeout": {
+            "type": "integer",
+            "default": 240,
+            "description": "Timeout in seconds for each Yosys SAT query."
+          }
+        },
+        "required": [
+          "netlist_path"
+        ]
+      },
+      "returns": {
+        "ok": "boolean",
+        "design_id": "string",
+        "module": "string",
+        "signal_count": "integer",
+        "net_count": "integer",
+        "cell_count": "integer",
+        "port_order": "array[string]"
+      }
     },
-    "required": [
-     "output_path"
-    ]
-   },
-   "returns": {
-    "ok": "boolean",
-    "output_path": "string",
-    "source_path": "string",
-    "bytes": "integer"
-   },
-   "notes": "For the current analysis-only backend this writes an unchanged copy of the loaded design."
-  },
-  {
-   "name": "analysis_count_gates",
-   "category": "analysis",
-   "description": "Count all cells and report totals broken down by gate type.",
-   "when_to_use": "Use for requests asking total gate count or gate count by type.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     },
-     "answer_style": {
-      "type": "string",
-      "enum": [
-       "total_only",
-       "and_only",
-       "or_only",
-       "not_only",
-       "nand_only",
-       "nor_only",
-       "xor_only",
-       "xnor_only",
-       "buf_only",
-       "dff_only"
-      ],
-      "description": "Which count to report. Whole-design total -> 'total_only'. A specific gate type -> '<type>_only', e.g. 'how many NAND gates are now in the design' -> 'nand_only'."
-     }
+    {
+      "name": "design_write",
+      "category": "design",
+      "description": "Write the current design to a Verilog file.",
+      "when_to_use": "Use when the request asks to write/output the current design.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "output_path": {
+            "type": "string",
+            "description": "Path where the output netlist should be written."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "output_path"
+        ]
+      },
+      "returns": {
+        "ok": "boolean",
+        "output_path": "string",
+        "source_path": "string",
+        "bytes": "integer"
+      },
+      "notes": "For the current analysis-only backend this writes an unchanged copy of the loaded design."
+    },
+    {
+      "name": "analysis_count_gates",
+      "category": "analysis",
+      "description": "Count all cells and report totals broken down by gate type.",
+      "when_to_use": "Use for requests asking total gate count or gate count by type.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          },
+          "answer_style": {
+            "type": "string",
+            "enum": [
+              "total_only",
+              "and_only",
+              "or_only",
+              "not_only",
+              "nand_only",
+              "nor_only",
+              "xor_only",
+              "xnor_only",
+              "buf_only",
+              "dff_only"
+            ],
+            "description": "Which count to report. Whole-design total -> 'total_only'. A specific gate type -> '<type>_only', e.g. 'how many NAND gates are now in the design' -> 'nand_only'."
+          }
+        }
+      },
+      "returns": {
+        "total": "integer",
+        "by_type": "object"
+      }
+    },
+    {
+      "name": "analysis_last_transform_stats",
+      "category": "analysis",
+      "description": "Report statistics from the most recent matching transformation or optimization without rerunning it.",
+      "when_to_use": "Use for requests asking how many gates were just added, inserted, removed, eliminated, or merged by a prior operation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string",
+            "description": "Which delta from the LAST transform: added_buffers; added_by_type (needs gate_type); removed_gates (dangling); eliminated_gates (constant prop); merged_gates (merge/duplicates).",
+            "enum": [
+              "added_buffers",
+              "added_by_type",
+              "removed_gates",
+              "eliminated_gates",
+              "merged_gates"
+            ]
+          },
+          "gate_type": {
+            "type": "string",
+            "description": "Gate type when metric is added_by_type."
+          },
+          "tool": {
+            "type": "string",
+            "description": "Optional source tool name to search, e.g. transformation_constant_propagation."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "metric"
+        ]
+      },
+      "returns": {
+        "value": "integer",
+        "matched_tool": "string|null",
+        "found": "boolean"
+      }
+    },
+    {
+      "name": "analysis_fanin_cone_size",
+      "category": "analysis",
+      "description": "Return the number of gates in the transitive fanin cone of an output/signal.",
+      "when_to_use": "Use when the request asks how many gates are in a fanin cone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "output": {
+            "type": "string",
+            "description": "Target net or signal, e.g. n15 or n31[0]."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "output"
+        ]
+      },
+      "returns": {
+        "output": "string",
+        "gate_count": "integer"
+      }
+    },
+    {
+      "name": "analysis_transitive_fanin_cone",
+      "category": "analysis",
+      "description": "List all gates in the transitive fanin cone of an output/signal.",
+      "when_to_use": "Use when the request asks to compute or list the transitive fanin cone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "output": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "output"
+        ]
+      },
+      "returns": {
+        "output": "string",
+        "gate_count": "integer",
+        "gates": "array[string]"
+      }
+    },
+    {
+      "name": "analysis_direct_fanout",
+      "category": "analysis",
+      "description": "List gates directly driven by a primary input, signal, or net.",
+      "when_to_use": "Use for direct fanout questions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "signal": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "signal"
+        ]
+      },
+      "returns": {
+        "signal": "string",
+        "gate_count": "integer",
+        "gates": "array[string]"
+      }
+    },
+    {
+      "name": "analysis_transitive_fanout_cone",
+      "category": "analysis",
+      "description": "List all gates in the transitive fanout cone of an input/signal.",
+      "when_to_use": "Use when the request asks to compute or list the transitive fanout cone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "input"
+        ]
+      },
+      "returns": {
+        "input": "string",
+        "gate_count": "integer",
+        "gates": "array[string]"
+      }
+    },
+    {
+      "name": "analysis_path_exists",
+      "category": "analysis",
+      "description": "Check whether a combinational path exists from source to target.",
+      "when_to_use": "Use for simple path-existence questions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ]
+      },
+      "returns": {
+        "source": "string",
+        "target": "string",
+        "exists": "boolean"
+      }
+    },
+    {
+      "name": "analysis_path_exists_avoiding",
+      "category": "analysis",
+      "description": "Check whether a combinational path exists while avoiding a specified net or gate; also supports all-paths-pass-through questions by interpreting exists=false as YES.",
+      "when_to_use": "Use for requests saying path exists that does not traverse/pass through/while avoiding a node.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "avoid": {
+            "type": "string",
+            "description": "Net/signal bit or gate to remove from the graph."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "source",
+          "target",
+          "avoid"
+        ]
+      },
+      "returns": {
+        "source": "string",
+        "target": "string",
+        "avoid": "string",
+        "exists": "boolean"
+      },
+      "notes": "For 'Does every path from A to B pass through C?', call this tool with avoid=C. If the returned exists is false, then every path passes through C and the user-facing answer is YES; if exists is true, answer NO."
+    },
+    {
+      "name": "analysis_enumerate_paths",
+      "category": "analysis",
+      "description": "Enumerate combinational paths from source to target, subject to path_limit.",
+      "when_to_use": "Use when the request asks to list every path or provide complete path enumeration.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "path_limit": {
+            "type": "integer",
+            "default": 1000000
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ]
+      },
+      "returns": {
+        "source": "string",
+        "target": "string",
+        "path_count": "integer",
+        "complete": "boolean",
+        "paths": "array[array[string]]"
+      },
+      "notes": "For official test01-test20, path_limit=1000000 is enough to avoid truncation."
+    },
+    {
+      "name": "analysis_max_logic_depth",
+      "category": "analysis",
+      "description": "Compute maximum combinational logic depth. Omit both source and target for full-design maximum depth; use target only for a specific fanin cone; use both source and target for source-to-target depth.",
+      "when_to_use": "Use for maximum logic depth, longest combinational path depth, or critical path depth questions. For full-design/current-design questions, pass no source or target; do not pass target='current', target='design', or target='netlist'.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Output/net for fanin-cone depth; OMIT for whole-design max depth. 'max depth from in0 to out3' -> source='in0', target='out3'; 'depth of the cone of h' -> target='h'."
+          },
+          "source": {
+            "type": "string",
+            "description": "Optional source net/signal. Use only together with target for source-to-target depth; omit with target for target fanin-cone depth."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "source": "string|null",
+        "target": "string",
+        "mode": "string",
+        "path_exists": "boolean",
+        "depth": "integer|null"
+      }
+    },
+    {
+      "name": "analysis_gate_successors",
+      "category": "analysis",
+      "description": "List immediate successor gates driven by a gate output.",
+      "when_to_use": "Use for questions asking gates driven by a gate or immediate successors of a gate.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "gate"
+        ]
+      },
+      "returns": {
+        "gate": "string",
+        "successor_count": "integer",
+        "successors": "array[string]"
+      }
+    },
+    {
+      "name": "verification_functional_equivalence",
+      "category": "verification",
+      "description": "Formally check whether two signals are functionally equivalent using Yosys SAT/miter.",
+      "when_to_use": "Use for requests asking whether two signals are functionally equivalent or produce identical logic values for all inputs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "left": {
+            "type": "string"
+          },
+          "right": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "left",
+          "right"
+        ]
+      },
+      "returns": {
+        "left": "string",
+        "right": "string",
+        "equivalent": "boolean|null",
+        "status": "string",
+        "method": "string",
+        "support_size": "integer",
+        "support": "array[string]",
+        "message": "string"
+      }
+    },
+    {
+      "name": "transformation_limit_fanout",
+      "category": "transformation",
+      "description": "Insert BUF gates so selected net(s) do not exceed max fanout.",
+      "when_to_use": "Insert BUF gates so selected net(s) do not exceed max fanout.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "max_fanout": {
+            "type": "integer",
+            "default": 4
+          },
+          "signal": {
+            "type": "string"
+          },
+          "dedicated": {
+            "type": "boolean",
+            "default": false
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "added_buffers": "integer",
+        "processed_nets": "integer",
+        "max_fanout": "integer"
+      }
+    },
+    {
+      "name": "transformation_insert_dedicated_buffers",
+      "category": "transformation",
+      "description": "Insert one dedicated BUF per load of a signal.",
+      "when_to_use": "Insert one dedicated BUF per load of a signal.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "signal": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "signal"
+        ]
+      },
+      "returns": {
+        "added_buffers": "integer"
+      }
+    },
+    {
+      "name": "transformation_remove_dangling_logic",
+      "category": "transformation",
+      "description": "Remove gates and wires that do not contribute to outputs or sequential boundaries.",
+      "when_to_use": "Remove gates and wires that do not contribute to outputs or sequential boundaries.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "removed_gates": "integer",
+        "removed_wires": "integer"
+      }
+    },
+    {
+      "name": "transformation_rename_identifier",
+      "category": "transformation",
+      "description": "Rename a gate, wire, net, or signal and update references.",
+      "when_to_use": "Rename a gate, wire, net, or signal and update references.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "old_name": {
+            "type": "string"
+          },
+          "new_name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "default": "auto"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "old_name",
+          "new_name"
+        ]
+      },
+      "returns": {
+        "renamed": "boolean",
+        "kind": "string"
+      }
+    },
+    {
+      "name": "transformation_reconnect_gate_input",
+      "category": "transformation",
+      "description": "Reconnect one input pin of a gate to another signal.",
+      "when_to_use": "Reconnect one input pin of a gate to another signal.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "pin": {
+            "type": "string"
+          },
+          "signal": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "gate",
+          "pin",
+          "signal"
+        ]
+      },
+      "returns": {
+        "changed": "boolean"
+      }
+    },
+    {
+      "name": "transformation_collapse_back_to_back_inverters",
+      "category": "transformation",
+      "description": "Collapse NOT gates followed by NOT gates into direct connections.",
+      "when_to_use": "Collapse NOT gates followed by NOT gates into direct connections.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "collapsed_pairs": "integer"
+      }
+    },
+    {
+      "name": "transformation_constant_propagation",
+      "category": "transformation",
+      "description": "Report and simplify gates with constant inputs.",
+      "when_to_use": "Report and simplify gates with constant inputs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gate_type": {
+            "type": "string",
+            "enum": [
+              "and",
+              "or",
+              "nand",
+              "nor",
+              "xor",
+              "xnor"
+            ],
+            "description": "Restrict to this 2-input gate type; omit for all. 'NAND gates with a constant input' -> 'nand'."
+          },
+          "constant": {
+            "type": "string",
+            "enum": [
+              "1'b0",
+              "1'b1"
+            ],
+            "description": "The tied constant value. 'constant 0 input' -> \"1'b0\"; 'tied to constant 1' -> \"1'b1\". Omit to match either."
+          },
+          "report_only": {
+            "type": "boolean",
+            "default": false,
+            "description": "true = only report matching gates (Report/Find/List/Identify, no netlist change). false = actually propagate/simplify."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "reported_gates": "array",
+        "eliminated_gates": "integer"
+      }
+    },
+    {
+      "name": "transformation_replace_gate_library",
+      "category": "transformation",
+      "description": "Replace gates in a design or cone with an equivalent target primitive library.",
+      "when_to_use": "Replace gates in a design or cone with an equivalent target primitive library.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "default": "design",
+            "enum": [
+              "design",
+              "cone"
+            ],
+            "description": "'design' = whole netlist (default). 'cone' = only the fanin cone of `target` (target REQUIRED when scope='cone')."
+          },
+          "target": {
+            "type": "string",
+            "description": "Signal/output whose cone to rewrite. REQUIRED when scope='cone'. 'in the cone of out0' -> target='out0'."
+          },
+          "from_gate": {
+            "type": "string",
+            "enum": [
+              "and",
+              "or",
+              "nand",
+              "nor",
+              "xor",
+              "xnor"
+            ],
+            "description": "Only rewrite gates of this 2-input type; omit to rewrite all. 'replace all 2-input OR gates' -> 'or'."
+          },
+          "to_library": {
+            "type": "string",
+            "default": "nand_not",
+            "enum": [
+              "and_not",
+              "or_not",
+              "nand_not",
+              "nor_not",
+              "and_or_not"
+            ],
+            "description": "Target gate set. 'using only NAND and NOT' -> 'nand_not'; 'NOR and NOT' -> 'nor_not'; 'AND and NOT' -> 'and_not'; 'OR and NOT' -> 'or_not'; 'AND, OR and NOT' -> 'and_or_not'."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "scope"
+        ]
+      },
+      "returns": {
+        "replaced_gates": "integer",
+        "added_by_type": "object"
+      },
+      "notes": "Target libraries include nand_not, nor_not, and_not, and and_or_not. nor_not uses direct NOR/NOT templates for common primitives including XNOR-to-NOR conversion."
+    },
+    {
+      "name": "optimization_reduce_depth",
+      "category": "optimization",
+      "description": "Try to reduce design or cone depth, preserving functionality.",
+      "when_to_use": "Try to reduce design or cone depth, preserving functionality.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Signal/output whose fanin cone to optimize. REQUIRED when scope='cone'. Take it verbatim from the request: 'optimize the cone of h' -> target='h'; 'logic cone of n11[0]' -> target='n11[0]'."
+          },
+          "max_depth": {
+            "type": "integer",
+            "description": "Depth bound from the request: 'maximum depth <= 5' -> 5; 'for each output with depth greater than 4' -> 4 (with scope='outputs_over_depth')."
+          },
+          "scope": {
+            "type": "string",
+            "default": "design",
+            "enum": [
+              "design",
+              "cone",
+              "outputs_over_depth"
+            ],
+            "description": "Where to optimize. 'design' = whole netlist (default). 'cone' = only the fanin cone of `target` (target REQUIRED). 'outputs_over_depth' = every output whose depth exceeds `max_depth`."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          },
+          "library": {
+            "type": "string",
+            "enum": [
+              "and_not",
+              "or_not",
+              "nand_not",
+              "nor_not",
+              "and_or_not"
+            ],
+            "description": "Gate-library HARD CONSTRAINT the RESULT must obey, when the SAME request says the netlist/cone must use ONLY a given gate set. Map the wording to one value: 'AND and NOT only' -> and_not; 'OR and NOT only' -> or_not; 'NAND and NOT only' -> nand_not; 'NOR and NOT only' -> nor_not; 'AND, OR and NOT only' -> and_or_not. OMIT this when the request states no gate-set restriction. This is NOT the same as to_library/from_gate, which belong to transformation_replace_gate_library."
+          },
+          "lib_scope": {
+            "type": "string",
+            "enum": [
+              "design",
+              "cone"
+            ],
+            "description": "Where the gate-library constraint applies: 'design' if the whole netlist must obey it ('ensuring the netlist remains AND and NOT only'), 'cone' if only a named signal's cone must ('ensuring the cone of n8 maintains only NAND and NOT'). Required whenever `library` is given."
+          },
+          "lib_target": {
+            "type": "string",
+            "description": "Signal whose cone the gate-library constraint applies to. Give it ONLY when lib_scope='cone' (e.g. 'the cone of n8 maintains only NAND and NOT' -> lib_target='n8'). Omit when lib_scope='design'. Note this can differ from `target`: 'Optimize the cone of n14 while the NETLIST remains NAND/NOT only' -> target='n14', scope='cone', library='nand_not', lib_scope='design' (no lib_target)."
+          }
+        },
+        "required": [
+          "scope"
+        ]
+      },
+      "returns": {
+        "status": "string",
+        "depth": "integer",
+        "original_depth": "integer"
+      }
+    },
+    {
+      "name": "optimization_merge_equivalent_or_duplicate_gates",
+      "category": "optimization",
+      "description": "Merge structurally duplicate or equivalent gates when safe.",
+      "when_to_use": "Merge structurally duplicate or equivalent gates when safe.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "default": "structural",
+            "enum": [
+              "structural",
+              "functional"
+            ],
+            "description": "'structural' = merge structural duplicates (same type + same inputs). 'functional' = merge functionally-equivalent gates (CEC-checked). 'functionally equivalent' -> 'functional'; 'structural duplicates'/'same boolean function' -> 'structural'."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "merged_gates": "integer"
+      }
+    },
+    {
+      "name": "analysis_max_fanout",
+      "category": "analysis",
+      "description": "Return maximum fanout for one signal, all nets, or primary inputs only.",
+      "when_to_use": "Use scope='primary_inputs' when asking which primary input has the highest fanout.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "signal": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Optional scope. Use 'primary_inputs' to consider only primary input bits."
+          },
+          "answer_style": {
+            "type": "string",
+            "description": "Optional renderer hint. Use 'signals_only' for 'which primary input' questions."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "max_fanout": "integer",
+        "signals": "array[string]",
+        "fanouts": "object"
+      }
+    },
+    {
+      "name": "analysis_primary_io_summary",
+      "category": "analysis",
+      "description": "Summarize primary inputs and primary outputs, optionally listing names with bit widths.",
+      "when_to_use": "Use for questions asking the number of primary inputs/outputs, or listing all primary inputs/outputs with bit widths. Set answer_style='inputs' when listing primary inputs with bit widths, answer_style='outputs' when listing primary outputs with bit widths, and answer_style='counts' for count-only questions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "answer_style": {
+            "type": "string",
+            "enum": [
+              "counts",
+              "inputs",
+              "outputs"
+            ],
+            "description": "Response style requested by the prompt. Use outputs for 'List all primary outputs ... with bit widths', inputs for primary inputs, counts for count-only summaries."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "input_count": "integer",
+        "output_count": "integer",
+        "inputs": "array",
+        "outputs": "array"
+      }
+    },
+    {
+      "name": "analysis_gate_info",
+      "category": "analysis",
+      "description": "analysis gate info",
+      "when_to_use": "analysis gate info",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "gate"
+        ]
+      },
+      "returns": {
+        "type": "string",
+        "inputs": "object",
+        "outputs": "object"
+      }
+    },
+    {
+      "name": "analysis_list_gates_by_type",
+      "category": "analysis",
+      "description": "analysis list gates by type",
+      "when_to_use": "analysis list gates by type",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gate_type": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "gate_type"
+        ]
+      },
+      "returns": {
+        "count": "integer",
+        "gates": "array"
+      }
+    },
+    {
+      "name": "analysis_cone_gate_type_count",
+      "category": "analysis",
+      "description": "analysis cone gate type count",
+      "when_to_use": "analysis cone gate type count",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "returns": {
+        "by_type": "object",
+        "gate_count": "integer"
+      }
+    },
+    {
+      "name": "analysis_shared_fanin_cone",
+      "category": "analysis",
+      "description": "analysis shared fanin cone",
+      "when_to_use": "analysis shared fanin cone",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "left": {
+            "type": "string"
+          },
+          "right": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "left",
+          "right"
+        ]
+      },
+      "returns": {
+        "gate_count": "integer",
+        "gates": "array[string]"
+      }
+    },
+    {
+      "name": "analysis_zero_length_paths",
+      "category": "analysis",
+      "description": "analysis zero length paths",
+      "when_to_use": "analysis zero length paths",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "path_count": "integer",
+        "paths": "array"
+      }
+    },
+    {
+      "name": "analysis_register_paths",
+      "category": "analysis",
+      "description": "Count/list register-to-register combinational paths from DFF outputs to DFF D inputs. This returns a path count/list, not a depth value.",
+      "when_to_use": "Use only when the request asks to list or count register-to-register paths. Do not use for maximum/longest/critical combinational depth on register-to-register paths; use analysis_register_path_depth for depth questions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "path_count": "integer",
+        "paths": "array"
+      }
+    },
+    {
+      "name": "analysis_register_path_depth",
+      "category": "analysis",
+      "description": "Compute the maximum combinational depth on any register-to-register path.",
+      "when_to_use": "Use for questions asking maximum combinational depth, maximum depth, longest depth, or critical depth on register-to-register paths. Example: 'What is the maximum combinational depth on any register-to-register path in this design?'",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "max_depth": "integer"
+      }
+    },
+    {
+      "name": "analysis_pi_to_dff_depth",
+      "category": "analysis",
+      "description": "analysis pi to dff depth",
+      "when_to_use": "analysis pi to dff depth",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "max_depth": "integer"
+      }
+    },
+    {
+      "name": "analysis_outputs_depth_over",
+      "category": "analysis",
+      "description": "analysis outputs depth over",
+      "when_to_use": "analysis outputs depth over",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "threshold": {
+            "type": "integer"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "threshold"
+        ]
+      },
+      "returns": {
+        "count": "integer",
+        "outputs": "array"
+      }
+    },
+    {
+      "name": "analysis_deepest_output",
+      "category": "analysis",
+      "description": "analysis deepest output",
+      "when_to_use": "analysis deepest output",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "output": "string",
+        "depth": "integer"
+      }
+    },
+    {
+      "name": "analysis_largest_fanin_cone_output",
+      "category": "analysis",
+      "description": "analysis largest fanin cone output",
+      "when_to_use": "analysis largest fanin cone output",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "output": "string",
+        "gate_count": "integer"
+      }
+    },
+    {
+      "name": "analysis_dffs_by_clock",
+      "category": "analysis",
+      "description": "analysis dffs by clock",
+      "when_to_use": "analysis dffs by clock",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clock": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "clock"
+        ]
+      },
+      "returns": {
+        "count": "integer",
+        "dffs": "array[string]"
+      }
+    },
+    {
+      "name": "analysis_floating_or_unconnected",
+      "category": "analysis",
+      "description": "analysis floating or unconnected",
+      "when_to_use": "analysis floating or unconnected",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "floating_count": "integer",
+        "floating": "array"
+      }
+    },
+    {
+      "name": "analysis_cut_or_articulation",
+      "category": "analysis",
+      "description": "Check whether a signal is a graph cut/articulation point, including strict PI-to-PO cut queries.",
+      "when_to_use": "Use scope='pi_to_po' for requests asking whether a wire is a cut between any primary input and any primary output.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "signal": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Optional scope. Use 'pi_to_po' for directed primary-input to primary-output cut checks."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "signal"
+        ]
+      },
+      "returns": {
+        "is_cut": "boolean"
+      }
+    },
+    {
+      "name": "analysis_articulation_points_between",
+      "category": "analysis",
+      "description": "List articulation points whose removal disconnects two named combinational graph nodes.",
+      "when_to_use": "Use for requests asking to find all articulation points between two nets, signals, or gate instances.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ]
+      },
+      "returns": {
+        "count": "integer",
+        "articulation_points": "array[string]",
+        "path_exists": "boolean"
+      }
+    },
+    {
+      "name": "analysis_boolean_expression",
+      "category": "analysis",
+      "description": "analysis boolean expression",
+      "when_to_use": "analysis boolean expression",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "returns": {
+        "expression": "string"
+      }
+    },
+    {
+      "name": "analysis_signal_dependency",
+      "category": "analysis",
+      "description": "analysis signal dependency",
+      "when_to_use": "analysis signal dependency",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "output": {
+            "type": "string"
+          },
+          "input": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "output",
+          "input"
+        ]
+      },
+      "returns": {
+        "depends": "boolean"
+      }
+    },
+    {
+      "name": "analysis_signal_symmetry",
+      "category": "analysis",
+      "description": "analysis signal symmetry",
+      "when_to_use": "analysis signal symmetry",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string"
+          },
+          "input_a": {
+            "type": "string"
+          },
+          "input_b": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "target",
+          "input_a",
+          "input_b"
+        ]
+      },
+      "returns": {
+        "symmetric": "boolean"
+      }
+    },
+    {
+      "name": "analysis_signal_constant",
+      "category": "analysis",
+      "description": "analysis signal constant",
+      "when_to_use": "analysis signal constant",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "signal": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string",
+            "description": "Optional expected constant value, e.g. 1'b0 or 1'b1."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "signal"
+        ]
+      },
+      "returns": {
+        "is_constant": "boolean",
+        "value": "string|null"
+      }
+    },
+    {
+      "name": "analysis_find_nand_equivalent",
+      "category": "analysis",
+      "description": "Find existing NAND gates whose two internal input signals form NAND(a,b) structurally equivalent to a target net.",
+      "when_to_use": "Use for requests asking whether there exists a pair of internal signals (a,b) such that NAND(a,b) is equivalent to a target.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "returns": {
+        "count": "integer",
+        "pairs": "array",
+        "method": "string"
+      }
+    },
+    {
+      "name": "analysis_dff_enable_hold_structures",
+      "category": "analysis",
+      "description": "analysis dff enable hold structures",
+      "when_to_use": "analysis dff enable hold structures",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "count": "integer",
+        "structures": "array"
+      }
+    },
+    {
+      "name": "verification_design_equivalence",
+      "category": "verification",
+      "description": "Check current design against original or pre-transform netlist.",
+      "when_to_use": "Check current design against original or pre-transform netlist.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "default": "original",
+            "enum": [
+              "original",
+              "pre_transform"
+            ],
+            "description": "Compare current design against: 'original' = netlist first loaded. 'pre_transform' = state just before the last transformation."
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": []
+      },
+      "returns": {
+        "equivalent": "boolean|null",
+        "status": "string",
+        "method": "string"
+      }
+    },
+    {
+      "name": "analysis_gate_on_max_depth_path",
+      "category": "analysis",
+      "description": "Determine whether a gate lies on any maximum-depth combinational path of the design.",
+      "when_to_use": "Use for questions asking whether a gate is on a maximum-depth or critical path.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "design_id": {
+            "type": "string",
+            "default": "current"
+          }
+        },
+        "required": [
+          "gate"
+        ]
+      },
+      "returns": {
+        "gate": "string",
+        "on_max_depth_path": "boolean",
+        "max_depth": "integer",
+        "gate_path_depth": "integer|null"
+      }
     }
-   },
-   "returns": {
-    "total": "integer",
-    "by_type": "object"
-   }
-  },
-  {
-   "name": "analysis_last_transform_stats",
-   "category": "analysis",
-   "description": "Report statistics from the most recent matching transformation or optimization without rerunning it.",
-   "when_to_use": "Use for requests asking how many gates were just added, inserted, removed, eliminated, or merged by a prior operation.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "metric": {
-      "type": "string",
-      "description": "Which delta from the LAST transform: added_buffers; added_by_type (needs gate_type); removed_gates (dangling); eliminated_gates (constant prop); merged_gates (merge/duplicates).",
-      "enum": [
-       "added_buffers",
-       "added_by_type",
-       "removed_gates",
-       "eliminated_gates",
-       "merged_gates"
-      ]
-     },
-     "gate_type": {
-      "type": "string",
-      "description": "Gate type when metric is added_by_type."
-     },
-     "tool": {
-      "type": "string",
-      "description": "Optional source tool name to search, e.g. transformation_constant_propagation."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "metric"
-    ]
-   },
-   "returns": {
-    "value": "integer",
-    "matched_tool": "string|null",
-    "found": "boolean"
-   }
-  },
-  {
-   "name": "analysis_fanin_cone_size",
-   "category": "analysis",
-   "description": "Return the number of gates in the transitive fanin cone of an output/signal.",
-   "when_to_use": "Use when the request asks how many gates are in a fanin cone.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "output": {
-      "type": "string",
-      "description": "Target net or signal, e.g. n15 or n31[0]."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "output"
-    ]
-   },
-   "returns": {
-    "output": "string",
-    "gate_count": "integer"
-   }
-  },
-  {
-   "name": "analysis_transitive_fanin_cone",
-   "category": "analysis",
-   "description": "List all gates in the transitive fanin cone of an output/signal.",
-   "when_to_use": "Use when the request asks to compute or list the transitive fanin cone.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "output": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "output"
-    ]
-   },
-   "returns": {
-    "output": "string",
-    "gate_count": "integer",
-    "gates": "array[string]"
-   }
-  },
-  {
-   "name": "analysis_direct_fanout",
-   "category": "analysis",
-   "description": "List gates directly driven by a primary input, signal, or net.",
-   "when_to_use": "Use for direct fanout questions.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "signal": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "signal"
-    ]
-   },
-   "returns": {
-    "signal": "string",
-    "gate_count": "integer",
-    "gates": "array[string]"
-   }
-  },
-  {
-   "name": "analysis_transitive_fanout_cone",
-   "category": "analysis",
-   "description": "List all gates in the transitive fanout cone of an input/signal.",
-   "when_to_use": "Use when the request asks to compute or list the transitive fanout cone.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "input": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "input"
-    ]
-   },
-   "returns": {
-    "input": "string",
-    "gate_count": "integer",
-    "gates": "array[string]"
-   }
-  },
-  {
-   "name": "analysis_path_exists",
-   "category": "analysis",
-   "description": "Check whether a combinational path exists from source to target.",
-   "when_to_use": "Use for simple path-existence questions.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "source": {
-      "type": "string"
-     },
-     "target": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "source",
-     "target"
-    ]
-   },
-   "returns": {
-    "source": "string",
-    "target": "string",
-    "exists": "boolean"
-   }
-  },
-  {
-   "name": "analysis_path_exists_avoiding",
-   "category": "analysis",
-   "description": "Check whether a combinational path exists while avoiding a specified net or gate; also supports all-paths-pass-through questions by interpreting exists=false as YES.",
-   "when_to_use": "Use for requests saying path exists that does not traverse/pass through/while avoiding a node.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "source": {
-      "type": "string"
-     },
-     "target": {
-      "type": "string"
-     },
-     "avoid": {
-      "type": "string",
-      "description": "Net/signal bit or gate to remove from the graph."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "source",
-     "target",
-     "avoid"
-    ]
-   },
-   "returns": {
-    "source": "string",
-    "target": "string",
-    "avoid": "string",
-    "exists": "boolean"
-   },
-   "notes": "For 'Does every path from A to B pass through C?', call this tool with avoid=C. If the returned exists is false, then every path passes through C and the user-facing answer is YES; if exists is true, answer NO."
-  },
-  {
-   "name": "analysis_enumerate_paths",
-   "category": "analysis",
-   "description": "Enumerate combinational paths from source to target, subject to path_limit.",
-   "when_to_use": "Use when the request asks to list every path or provide complete path enumeration.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "source": {
-      "type": "string"
-     },
-     "target": {
-      "type": "string"
-     },
-     "path_limit": {
-      "type": "integer",
-      "default": 1000000
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "source",
-     "target"
-    ]
-   },
-   "returns": {
-    "source": "string",
-    "target": "string",
-    "path_count": "integer",
-    "complete": "boolean",
-    "paths": "array[array[string]]"
-   },
-   "notes": "For official test01-test20, path_limit=1000000 is enough to avoid truncation."
-  },
-  {
-   "name": "analysis_max_logic_depth",
-   "category": "analysis",
-   "description": "Compute maximum combinational logic depth. Omit both source and target for full-design maximum depth; use target only for a specific fanin cone; use both source and target for source-to-target depth.",
-   "when_to_use": "Use for maximum logic depth, longest combinational path depth, or critical path depth questions. For full-design/current-design questions, pass no source or target; do not pass target='current', target='design', or target='netlist'.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "target": {
-      "type": "string",
-      "description": "Output/net for fanin-cone depth; OMIT for whole-design max depth. 'max depth from in0 to out3' -> source='in0', target='out3'; 'depth of the cone of h' -> target='h'."
-     },
-     "source": {
-      "type": "string",
-      "description": "Optional source net/signal. Use only together with target for source-to-target depth; omit with target for target fanin-cone depth."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "source": "string|null",
-    "target": "string",
-    "mode": "string",
-    "path_exists": "boolean",
-    "depth": "integer|null"
-   }
-  },
-  {
-   "name": "analysis_gate_successors",
-   "category": "analysis",
-   "description": "List immediate successor gates driven by a gate output.",
-   "when_to_use": "Use for questions asking gates driven by a gate or immediate successors of a gate.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "gate": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "gate"
-    ]
-   },
-   "returns": {
-    "gate": "string",
-    "successor_count": "integer",
-    "successors": "array[string]"
-   }
-  },
-  {
-   "name": "verification_functional_equivalence",
-   "category": "verification",
-   "description": "Formally check whether two signals are functionally equivalent using Yosys SAT/miter.",
-   "when_to_use": "Use for requests asking whether two signals are functionally equivalent or produce identical logic values for all inputs.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "left": {
-      "type": "string"
-     },
-     "right": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "left",
-     "right"
-    ]
-   },
-   "returns": {
-    "left": "string",
-    "right": "string",
-    "equivalent": "boolean|null",
-    "status": "string",
-    "method": "string",
-    "support_size": "integer",
-    "support": "array[string]",
-    "message": "string"
-   }
-  },
-  {
-   "name": "transformation_limit_fanout",
-   "category": "transformation",
-   "description": "Insert BUF gates so selected net(s) do not exceed max fanout.",
-   "when_to_use": "Insert BUF gates so selected net(s) do not exceed max fanout.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "max_fanout": {
-      "type": "integer",
-      "default": 4
-     },
-     "signal": {
-      "type": "string"
-     },
-     "dedicated": {
-      "type": "boolean",
-      "default": false
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "added_buffers": "integer",
-    "processed_nets": "integer",
-    "max_fanout": "integer"
-   }
-  },
-  {
-   "name": "transformation_insert_dedicated_buffers",
-   "category": "transformation",
-   "description": "Insert one dedicated BUF per load of a signal.",
-   "when_to_use": "Insert one dedicated BUF per load of a signal.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "signal": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "signal"
-    ]
-   },
-   "returns": {
-    "added_buffers": "integer"
-   }
-  },
-  {
-   "name": "transformation_remove_dangling_logic",
-   "category": "transformation",
-   "description": "Remove gates and wires that do not contribute to outputs or sequential boundaries.",
-   "when_to_use": "Remove gates and wires that do not contribute to outputs or sequential boundaries.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "removed_gates": "integer",
-    "removed_wires": "integer"
-   }
-  },
-  {
-   "name": "transformation_rename_identifier",
-   "category": "transformation",
-   "description": "Rename a gate, wire, net, or signal and update references.",
-   "when_to_use": "Rename a gate, wire, net, or signal and update references.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "old_name": {
-      "type": "string"
-     },
-     "new_name": {
-      "type": "string"
-     },
-     "kind": {
-      "type": "string",
-      "default": "auto"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "old_name",
-     "new_name"
-    ]
-   },
-   "returns": {
-    "renamed": "boolean",
-    "kind": "string"
-   }
-  },
-  {
-   "name": "transformation_reconnect_gate_input",
-   "category": "transformation",
-   "description": "Reconnect one input pin of a gate to another signal.",
-   "when_to_use": "Reconnect one input pin of a gate to another signal.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "gate": {
-      "type": "string"
-     },
-     "pin": {
-      "type": "string"
-     },
-     "signal": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "gate",
-     "pin",
-     "signal"
-    ]
-   },
-   "returns": {
-    "changed": "boolean"
-   }
-  },
-  {
-   "name": "transformation_collapse_back_to_back_inverters",
-   "category": "transformation",
-   "description": "Collapse NOT gates followed by NOT gates into direct connections.",
-   "when_to_use": "Collapse NOT gates followed by NOT gates into direct connections.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "collapsed_pairs": "integer"
-   }
-  },
-  {
-   "name": "transformation_constant_propagation",
-   "category": "transformation",
-   "description": "Report and simplify gates with constant inputs.",
-   "when_to_use": "Report and simplify gates with constant inputs.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "gate_type": {
-      "type": "string",
-      "enum": [
-       "and",
-       "or",
-       "nand",
-       "nor",
-       "xor",
-       "xnor"
-      ],
-      "description": "Restrict to this 2-input gate type; omit for all. 'NAND gates with a constant input' -> 'nand'."
-     },
-     "constant": {
-      "type": "string",
-      "enum": [
-       "1'b0",
-       "1'b1"
-      ],
-      "description": "The tied constant value. 'constant 0 input' -> \"1'b0\"; 'tied to constant 1' -> \"1'b1\". Omit to match either."
-     },
-     "report_only": {
-      "type": "boolean",
-      "default": false,
-      "description": "true = only report matching gates (Report/Find/List/Identify, no netlist change). false = actually propagate/simplify."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "reported_gates": "array",
-    "eliminated_gates": "integer"
-   }
-  },
-  {
-   "name": "transformation_replace_gate_library",
-   "category": "transformation",
-   "description": "Replace gates in a design or cone with an equivalent target primitive library.",
-   "when_to_use": "Replace gates in a design or cone with an equivalent target primitive library.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "scope": {
-      "type": "string",
-      "default": "design",
-      "enum": [
-       "design",
-       "cone"
-      ],
-      "description": "'design' = whole netlist (default). 'cone' = only the fanin cone of `target` (target REQUIRED when scope='cone')."
-     },
-     "target": {
-      "type": "string",
-      "description": "Signal/output whose cone to rewrite. REQUIRED when scope='cone'. 'in the cone of out0' -> target='out0'."
-     },
-     "from_gate": {
-      "type": "string",
-      "enum": [
-       "and",
-       "or",
-       "nand",
-       "nor",
-       "xor",
-       "xnor"
-      ],
-      "description": "Only rewrite gates of this 2-input type; omit to rewrite all. 'replace all 2-input OR gates' -> 'or'."
-     },
-     "to_library": {
-      "type": "string",
-      "default": "nand_not",
-      "enum": [
-       "and_not",
-       "or_not",
-       "nand_not",
-       "nor_not",
-       "and_or_not"
-      ],
-      "description": "Target gate set. 'using only NAND and NOT' -> 'nand_not'; 'NOR and NOT' -> 'nor_not'; 'AND and NOT' -> 'and_not'; 'OR and NOT' -> 'or_not'; 'AND, OR and NOT' -> 'and_or_not'."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "scope"
-    ]
-   },
-   "returns": {
-    "replaced_gates": "integer",
-    "added_by_type": "object"
-   },
-   "notes": "Target libraries include nand_not, nor_not, and_not, and and_or_not. nor_not uses direct NOR/NOT templates for common primitives including XNOR-to-NOR conversion."
-  },
-  {
-   "name": "optimization_reduce_depth",
-   "category": "optimization",
-   "description": "Try to reduce design or cone depth, preserving functionality.",
-   "when_to_use": "Try to reduce design or cone depth, preserving functionality.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "target": {
-      "type": "string",
-      "description": "Signal/output whose fanin cone to optimize. REQUIRED when scope='cone'. Take it verbatim from the request: 'optimize the cone of h' -> target='h'; 'logic cone of n11[0]' -> target='n11[0]'."
-     },
-     "max_depth": {
-      "type": "integer",
-      "description": "Depth bound from the request: 'maximum depth <= 5' -> 5; 'for each output with depth greater than 4' -> 4 (with scope='outputs_over_depth')."
-     },
-     "scope": {
-      "type": "string",
-      "default": "design",
-      "enum": [
-       "design",
-       "cone",
-       "outputs_over_depth"
-      ],
-      "description": "Where to optimize. 'design' = whole netlist (default). 'cone' = only the fanin cone of `target` (target REQUIRED). 'outputs_over_depth' = every output whose depth exceeds `max_depth`."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "scope"
-    ]
-   },
-   "returns": {
-    "status": "string",
-    "depth": "integer",
-    "original_depth": "integer"
-   }
-  },
-  {
-   "name": "optimization_merge_equivalent_or_duplicate_gates",
-   "category": "optimization",
-   "description": "Merge structurally duplicate or equivalent gates when safe.",
-   "when_to_use": "Merge structurally duplicate or equivalent gates when safe.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "mode": {
-      "type": "string",
-      "default": "structural",
-      "enum": [
-       "structural",
-       "functional"
-      ],
-      "description": "'structural' = merge structural duplicates (same type + same inputs). 'functional' = merge functionally-equivalent gates (CEC-checked). 'functionally equivalent' -> 'functional'; 'structural duplicates'/'same boolean function' -> 'structural'."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "merged_gates": "integer"
-   }
-  },
-  {
-   "name": "analysis_max_fanout",
-   "category": "analysis",
-   "description": "Return maximum fanout for one signal, all nets, or primary inputs only.",
-   "when_to_use": "Use scope='primary_inputs' when asking which primary input has the highest fanout.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "signal": {
-      "type": "string"
-     },
-     "scope": {
-      "type": "string",
-      "description": "Optional scope. Use 'primary_inputs' to consider only primary input bits."
-     },
-     "answer_style": {
-      "type": "string",
-      "description": "Optional renderer hint. Use 'signals_only' for 'which primary input' questions."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "max_fanout": "integer",
-    "signals": "array[string]",
-    "fanouts": "object"
-   }
-  },
-  {
-   "name": "analysis_primary_io_summary",
-   "category": "analysis",
-   "description": "Summarize primary inputs and primary outputs, optionally listing names with bit widths.",
-   "when_to_use": "Use for questions asking the number of primary inputs/outputs, or listing all primary inputs/outputs with bit widths. Set answer_style='inputs' when listing primary inputs with bit widths, answer_style='outputs' when listing primary outputs with bit widths, and answer_style='counts' for count-only questions.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "answer_style": {
-      "type": "string",
-      "enum": [
-       "counts",
-       "inputs",
-       "outputs"
-      ],
-      "description": "Response style requested by the prompt. Use outputs for 'List all primary outputs ... with bit widths', inputs for primary inputs, counts for count-only summaries."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "input_count": "integer",
-    "output_count": "integer",
-    "inputs": "array",
-    "outputs": "array"
-   }
-  },
-  {
-   "name": "analysis_gate_info",
-   "category": "analysis",
-   "description": "analysis gate info",
-   "when_to_use": "analysis gate info",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "gate": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "gate"
-    ]
-   },
-   "returns": {
-    "type": "string",
-    "inputs": "object",
-    "outputs": "object"
-   }
-  },
-  {
-   "name": "analysis_list_gates_by_type",
-   "category": "analysis",
-   "description": "analysis list gates by type",
-   "when_to_use": "analysis list gates by type",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "gate_type": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "gate_type"
-    ]
-   },
-   "returns": {
-    "count": "integer",
-    "gates": "array"
-   }
-  },
-  {
-   "name": "analysis_cone_gate_type_count",
-   "category": "analysis",
-   "description": "analysis cone gate type count",
-   "when_to_use": "analysis cone gate type count",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "target": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "target"
-    ]
-   },
-   "returns": {
-    "by_type": "object",
-    "gate_count": "integer"
-   }
-  },
-  {
-   "name": "analysis_shared_fanin_cone",
-   "category": "analysis",
-   "description": "analysis shared fanin cone",
-   "when_to_use": "analysis shared fanin cone",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "left": {
-      "type": "string"
-     },
-     "right": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "left",
-     "right"
-    ]
-   },
-   "returns": {
-    "gate_count": "integer",
-    "gates": "array[string]"
-   }
-  },
-  {
-   "name": "analysis_zero_length_paths",
-   "category": "analysis",
-   "description": "analysis zero length paths",
-   "when_to_use": "analysis zero length paths",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "path_count": "integer",
-    "paths": "array"
-   }
-  },
-  {
-   "name": "analysis_register_paths",
-   "category": "analysis",
-   "description": "Count/list register-to-register combinational paths from DFF outputs to DFF D inputs. This returns a path count/list, not a depth value.",
-   "when_to_use": "Use only when the request asks to list or count register-to-register paths. Do not use for maximum/longest/critical combinational depth on register-to-register paths; use analysis_register_path_depth for depth questions.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "path_count": "integer",
-    "paths": "array"
-   }
-  },
-  {
-   "name": "analysis_register_path_depth",
-   "category": "analysis",
-   "description": "Compute the maximum combinational depth on any register-to-register path.",
-   "when_to_use": "Use for questions asking maximum combinational depth, maximum depth, longest depth, or critical depth on register-to-register paths. Example: 'What is the maximum combinational depth on any register-to-register path in this design?'",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "max_depth": "integer"
-   }
-  },
-  {
-   "name": "analysis_pi_to_dff_depth",
-   "category": "analysis",
-   "description": "analysis pi to dff depth",
-   "when_to_use": "analysis pi to dff depth",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "max_depth": "integer"
-   }
-  },
-  {
-   "name": "analysis_outputs_depth_over",
-   "category": "analysis",
-   "description": "analysis outputs depth over",
-   "when_to_use": "analysis outputs depth over",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "threshold": {
-      "type": "integer"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "threshold"
-    ]
-   },
-   "returns": {
-    "count": "integer",
-    "outputs": "array"
-   }
-  },
-  {
-   "name": "analysis_deepest_output",
-   "category": "analysis",
-   "description": "analysis deepest output",
-   "when_to_use": "analysis deepest output",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "output": "string",
-    "depth": "integer"
-   }
-  },
-  {
-   "name": "analysis_largest_fanin_cone_output",
-   "category": "analysis",
-   "description": "analysis largest fanin cone output",
-   "when_to_use": "analysis largest fanin cone output",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "output": "string",
-    "gate_count": "integer"
-   }
-  },
-  {
-   "name": "analysis_dffs_by_clock",
-   "category": "analysis",
-   "description": "analysis dffs by clock",
-   "when_to_use": "analysis dffs by clock",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "clock": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "clock"
-    ]
-   },
-   "returns": {
-    "count": "integer",
-    "dffs": "array[string]"
-   }
-  },
-  {
-   "name": "analysis_floating_or_unconnected",
-   "category": "analysis",
-   "description": "analysis floating or unconnected",
-   "when_to_use": "analysis floating or unconnected",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "floating_count": "integer",
-    "floating": "array"
-   }
-  },
-  {
-   "name": "analysis_cut_or_articulation",
-   "category": "analysis",
-   "description": "Check whether a signal is a graph cut/articulation point, including strict PI-to-PO cut queries.",
-   "when_to_use": "Use scope='pi_to_po' for requests asking whether a wire is a cut between any primary input and any primary output.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "signal": {
-      "type": "string"
-     },
-     "scope": {
-      "type": "string",
-      "description": "Optional scope. Use 'pi_to_po' for directed primary-input to primary-output cut checks."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "signal"
-    ]
-   },
-   "returns": {
-    "is_cut": "boolean"
-   }
-  },
-  {
-   "name": "analysis_articulation_points_between",
-   "category": "analysis",
-   "description": "List articulation points whose removal disconnects two named combinational graph nodes.",
-   "when_to_use": "Use for requests asking to find all articulation points between two nets, signals, or gate instances.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "source": {
-      "type": "string"
-     },
-     "target": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "source",
-     "target"
-    ]
-   },
-   "returns": {
-    "count": "integer",
-    "articulation_points": "array[string]",
-    "path_exists": "boolean"
-   }
-  },
-  {
-   "name": "analysis_boolean_expression",
-   "category": "analysis",
-   "description": "analysis boolean expression",
-   "when_to_use": "analysis boolean expression",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "target": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "target"
-    ]
-   },
-   "returns": {
-    "expression": "string"
-   }
-  },
-  {
-   "name": "analysis_signal_dependency",
-   "category": "analysis",
-   "description": "analysis signal dependency",
-   "when_to_use": "analysis signal dependency",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "output": {
-      "type": "string"
-     },
-     "input": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "output",
-     "input"
-    ]
-   },
-   "returns": {
-    "depends": "boolean"
-   }
-  },
-  {
-   "name": "analysis_signal_symmetry",
-   "category": "analysis",
-   "description": "analysis signal symmetry",
-   "when_to_use": "analysis signal symmetry",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "target": {
-      "type": "string"
-     },
-     "input_a": {
-      "type": "string"
-     },
-     "input_b": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "target",
-     "input_a",
-     "input_b"
-    ]
-   },
-   "returns": {
-    "symmetric": "boolean"
-   }
-  },
-  {
-   "name": "analysis_signal_constant",
-   "category": "analysis",
-   "description": "analysis signal constant",
-   "when_to_use": "analysis signal constant",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "signal": {
-      "type": "string"
-     },
-     "value": {
-      "type": "string",
-      "description": "Optional expected constant value, e.g. 1'b0 or 1'b1."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "signal"
-    ]
-   },
-   "returns": {
-    "is_constant": "boolean",
-    "value": "string|null"
-   }
-  },
-  {
-   "name": "analysis_find_nand_equivalent",
-   "category": "analysis",
-   "description": "Find existing NAND gates whose two internal input signals form NAND(a,b) structurally equivalent to a target net.",
-   "when_to_use": "Use for requests asking whether there exists a pair of internal signals (a,b) such that NAND(a,b) is equivalent to a target.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "target": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "target"
-    ]
-   },
-   "returns": {
-    "count": "integer",
-    "pairs": "array",
-    "method": "string"
-   }
-  },
-  {
-   "name": "analysis_dff_enable_hold_structures",
-   "category": "analysis",
-   "description": "analysis dff enable hold structures",
-   "when_to_use": "analysis dff enable hold structures",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "count": "integer",
-    "structures": "array"
-   }
-  },
-  {
-   "name": "verification_design_equivalence",
-   "category": "verification",
-   "description": "Check current design against original or pre-transform netlist.",
-   "when_to_use": "Check current design against original or pre-transform netlist.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "reference": {
-      "type": "string",
-      "default": "original",
-      "enum": [
-       "original",
-       "pre_transform"
-      ],
-      "description": "Compare current design against: 'original' = netlist first loaded. 'pre_transform' = state just before the last transformation."
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": []
-   },
-   "returns": {
-    "equivalent": "boolean|null",
-    "status": "string",
-    "method": "string"
-   }
-  },
-  {
-   "name": "analysis_gate_on_max_depth_path",
-   "category": "analysis",
-   "description": "Determine whether a gate lies on any maximum-depth combinational path of the design.",
-   "when_to_use": "Use for questions asking whether a gate is on a maximum-depth or critical path.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "gate": {
-      "type": "string"
-     },
-     "design_id": {
-      "type": "string",
-      "default": "current"
-     }
-    },
-    "required": [
-     "gate"
-    ]
-   },
-   "returns": {
-    "gate": "string",
-    "on_max_depth_path": "boolean",
-    "max_depth": "integer",
-    "gate_path_depth": "integer|null"
-   }
-  }
- ]
+  ]
 }

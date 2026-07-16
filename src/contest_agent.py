@@ -356,7 +356,10 @@ def _json_post(url: str, headers: Dict[str, str], body: Dict[str, Any], timeout:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             last_error = RuntimeError(f"LLM HTTP error {exc.code}: {detail}")
-            if exc.code != 429 or attempt == 5:
+            # 429（限流）和 5xx（上游/中转站临时故障，如 holdai 503）都是瞬时错误，
+            # 重试可自愈；4xx（除 429）是永久错误（key 失效等），立即抛出不浪费退避。
+            retryable = exc.code == 429 or exc.code >= 500
+            if not retryable or attempt == 5:
                 raise last_error from exc
         except urllib.error.URLError as exc:
             last_error = exc
@@ -683,7 +686,8 @@ def _tools_for_anthropic(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
     return at_tools
 
 
-def build_llm_system_prompt(tool_contract: Dict[str, Any]) -> str:
+def _llm_protocol_and_spec_tools(tool_contract: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The two protocol tools + the spec tools (minus the duplicate design_load)."""
     protocol_tools = [
         {
             "name": "begin_testcase",
@@ -710,9 +714,22 @@ def build_llm_system_prompt(tool_contract: Dict[str, Any]) -> str:
         },
     ]
     spec_tools = [tool for tool in tool_contract.get("tools", []) if tool.get("name") != "design_load"]
-    llm_tools = protocol_tools + spec_tools
+    return protocol_tools + spec_tools
+
+
+def build_llm_contract_block(tool_contract: Dict[str, Any]) -> str:
+    """The full tool contract rendered as a JSON string.
+
+    This is ONLY appended to the system prompt on the JSON-mode fallback path
+    (used when a proxy strips the native Function-Calling ``tools`` parameter).
+    On the normal FC path the model already receives every tool's
+    name/description/when_to_use/parameters via the ``tools`` parameter
+    (see ``_tools_for_openai`` / ``_tools_for_anthropic``, which fold
+    ``when_to_use`` into each description and honor ``_TOOL_DESC_OVERRIDES``),
+    so embedding this block on every call was ~10K duplicated input tokens.
+    """
     compact = []
-    for tool in llm_tools:
+    for tool in _llm_protocol_and_spec_tools(tool_contract):
         name = tool.get("name")
         if name in _TOOL_DESC_OVERRIDES:
             desc, wtu = _TOOL_DESC_OVERRIDES[name], ""
@@ -726,7 +743,30 @@ def build_llm_system_prompt(tool_contract: Dict[str, Any]) -> str:
                 "parameters": tool.get("parameters", {}),
             }
         )
+    return "Available tool contract follows as JSON:\n" + json.dumps(
+        {
+            "common_notes": tool_contract.get("common_notes", []),
+            "tools": compact,
+        },
+        ensure_ascii=False,
+        sort_keys=False,
+    )
 
+
+def build_llm_system_prompt(tool_contract: Dict[str, Any]) -> str:
+    """Slim system prompt for the Function-Calling path (no duplicated contract).
+
+    The full per-tool schema is delivered via the native ``tools`` parameter, so
+    this prompt keeps only the routing rules and the short ``common_notes`` that
+    do not otherwise reach the model.
+    """
+    common_notes = tool_contract.get("common_notes", [])
+    notes_block = ""
+    if common_notes:
+        notes_block = (
+            "General notes that apply to all tools:\n"
+            + json.dumps(common_notes, ensure_ascii=False)
+        )
     return (
         "You are the request parser for an ICCAD gate-level netlist EDA agent. "
         "Translate each natural-language request into exactly one JSON tool call. "
@@ -735,16 +775,7 @@ def build_llm_system_prompt(tool_contract: Dict[str, Any]) -> str:
         "Preserve every net, signal, bus bit, gate, and file name exactly as written, including names such as n0[1]. "
         "Constant logic values must be written in Verilog form \"1'b0\" or \"1'b1\" (never \"0\" or \"1\") wherever a tool takes a constant value, including the constant argument of transformation_constant_propagation and the value argument of analysis_signal_constant. "
         + _LLM_ROUTING_GUIDE
-        +
-        "Available tool contract follows as JSON:\n"
-        + json.dumps(
-            {
-                "common_notes": tool_contract.get("common_notes", []),
-                "tools": compact,
-            },
-            ensure_ascii=False,
-            sort_keys=False,
-        )
+        + notes_block
     )
 
 
@@ -816,9 +847,18 @@ class RequestParser:
         self.tools_openai = _tools_for_openai(self.tool_contract, strict=getattr(config, "fc_strict", False))
         self.tools_anthropic = _tools_for_anthropic(self.tool_contract)
         self.system_prompt = build_llm_system_prompt(self.tool_contract)
+        # Only used if a proxy strips the FC `tools` param and we fall back to
+        # JSON mode; then the model needs the tool contract in-prompt.
+        self.system_prompt_fallback = (
+            self.system_prompt + "\n" + build_llm_contract_block(self.tool_contract)
+        )
         self.review_prompt = build_llm_review_prompt(self.tool_contract)
+        # 最近一次「LLM 失败 -> 降级 regex」的原因；正常为 None。仅用于诊断/报表，
+        # 不参与任何路由判断。
+        self.last_fallback_error: Optional[str] = None
 
     def parse(self, request: str) -> ToolCall:
+        self.last_fallback_error = None
         mode = self.config.parser
         if mode not in {"regex", "llm", "hybrid"}:
             mode = "hybrid"
@@ -836,11 +876,21 @@ class RequestParser:
             call = self._parse_with_llm(request)
             self._validate(call)
             return call
-        except json.JSONDecodeError:
-            # 大模型偶发返回非法 JSON：退回 regex 再试一次，而不是直接失败。
+        except Exception as exc:
+            # 大模型任何失败（非法 JSON / HTTP 5xx / 超时 / 断连 / 校验不过）都降级到
+            # 确定性的 regex 快路径，而不是让整条 prompt 变 parse_error skip=0 分。
+            # 正常情况下不会进这里；进来了也只是退回和公开集 hybrid 逐格一致的 regex，
+            # 若 regex 也解析不了会再次抛出（与改动前的 skip 行为等价，不会更差）。
+            #
+            # 关键：把降级**记录下来并打到 stderr**。否则 llm 模式下 LLM 一失败就被
+            # regex 静默兜住，报表里看不出区别 —— 用 llm 模式验收「LLM 能否正确传参」
+            # 时会得到假阳性结论。source 改为 "regex_fallback" 以便报表区分；
+            # 这个值除了错误信息与报表外没有任何消费者，不影响路由。
+            self.last_fallback_error = f"{type(exc).__name__}: {exc}"
+            print(f"[llm-fallback] {self.last_fallback_error} | {request[:60]}", file=sys.stderr)
             call = self._parse_with_regex(request)
             self._validate(call)
-            return call
+            return ToolCall(call.tool, call.arguments, "regex_fallback")
 
     def _validate(self, call: ToolCall) -> None:
         if call.tool not in ALLOWED_TOOLS:
@@ -857,9 +907,15 @@ class RequestParser:
         user = f"Request: {request}"
 
         if self.config.provider == "anthropic":
-            payload = self._call_anthropic(system, user, tools=self.tools_anthropic)
+            payload = self._call_anthropic(
+                system, user, tools=self.tools_anthropic,
+                fallback_system=self.system_prompt_fallback,
+            )
         else:
-            payload = self._call_openai(system, user, tools=self.tools_openai)
+            payload = self._call_openai(
+                system, user, tools=self.tools_openai,
+                fallback_system=self.system_prompt_fallback,
+            )
 
         tool = str(payload.get("tool", ""))
         args = payload.get("arguments", {})
@@ -1108,7 +1164,14 @@ class RequestParser:
             return ToolCall(call.tool, args, call.source)
         return call
 
-    def _call_openai(self, system: str, user: str, *, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def _call_openai(
+        self,
+        system: str,
+        user: str,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        fallback_system: Optional[str] = None,
+    ) -> Dict[str, Any]:
         base_url = self.config.base_url or "https://api.openai.com/v1"
         url = base_url.rstrip("/")
         if not url.endswith("/chat/completions"):
@@ -1127,7 +1190,7 @@ class RequestParser:
             "max_tokens": self.config.max_output_tokens,
         }
         if tools:
-            # --- Function Calling path ---
+            # --- Function Calling path (slim system prompt; schemas come from `tools`) ---
             body = dict(base_body)
             body["tools"] = tools
             body["tool_choice"] = "required"
@@ -1140,12 +1203,26 @@ class RequestParser:
             # proxies do this). Fall back to JSON mode instead of failing the request.
         # --- Legacy JSON Mode path (used by review/judge calls and FC fallback) ---
         body = dict(base_body)
+        if tools and fallback_system:
+            # In FC fallback the model no longer sees the `tools` schemas, so it
+            # needs the full contract in the system message to name tools/params.
+            body["messages"] = [
+                {"role": "system", "content": fallback_system},
+                {"role": "user", "content": user},
+            ]
         body["response_format"] = {"type": "json_object"}
         data = _json_post(url, headers, body)
         content = data["choices"][0]["message"]["content"]
         return _extract_json_object(content)
 
-    def _call_anthropic(self, system: str, user: str, *, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def _call_anthropic(
+        self,
+        system: str,
+        user: str,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        fallback_system: Optional[str] = None,
+    ) -> Dict[str, Any]:
         base_url = self.config.base_url or "https://api.anthropic.com/v1/messages"
         url = base_url.rstrip("/")
         if not url.endswith("/messages"):
@@ -1163,7 +1240,7 @@ class RequestParser:
             "messages": [{"role": "user", "content": user}],
         }
         if tools:
-            # --- Function Calling path ---
+            # --- Function Calling path (slim system prompt; schemas come from `tools`) ---
             body = dict(base_body)
             body["tools"] = tools
             body["tool_choice"] = {"type": "any"}
@@ -1174,7 +1251,12 @@ class RequestParser:
                 return {"tool": tu["name"], "arguments": tu["input"]}
             # Endpoint ignored/stripped the tools params; fall back to JSON mode.
         # --- Legacy JSON Mode path (used by review/judge calls and FC fallback) ---
-        data = _json_post(url, headers, base_body)
+        body = dict(base_body)
+        if tools and fallback_system:
+            # In FC fallback the model no longer sees the `tools` schemas, so it
+            # needs the full contract in the system message to name tools/params.
+            body["system"] = fallback_system
+        data = _json_post(url, headers, body)
         content_blocks = data.get("content", [])
         text = "".join(block.get("text", "") for block in content_blocks if block.get("type") == "text")
         return _extract_json_object(text)
@@ -1870,6 +1952,9 @@ class ContestAgent:
         self.action_history: List[Dict[str, Any]] = []
         self.last_auto_verify_seconds = 0.0
         self.last_auto_equivalence: Optional[Dict[str, Any]] = None
+        self.last_source: Optional[str] = None
+        self.last_args: Optional[str] = None
+        self.last_fallback_error: Optional[str] = None
 
     def _resolve_netlist_path(self, file_name: str, directory: str) -> Path:
         file_name = _strip_quotes(file_name)
@@ -2109,6 +2194,9 @@ class ContestAgent:
     def process_request(self, request: str) -> str:
         request = request.strip()
         self.last_tool = None
+        self.last_source = None          # 本条 prompt 最终由谁解析：regex / llm / regex_fallback
+        self.last_args = None            # 本条 prompt 解析出的实参（诊断用）
+        self.last_fallback_error = None  # 若发生降级，记录 LLM 侧的失败原因
         self.last_auto_verify_seconds = 0.0
         self.last_auto_equivalence = None
         self.last_parse_seconds = 0.0
@@ -2118,6 +2206,15 @@ class ContestAgent:
         call = self.parser.parse(request)
         self.last_parse_seconds = time.perf_counter() - _t_parse  # 前端用时（解析：regex/LLM 路由）
         self.last_tool = call.tool
+        self.last_source = call.source
+        # 记录本条 prompt 最终解析出的实参。诊断用：报表里只有 tool 名时，无法判断
+        # 「工具选对了但参数填错」这一类问题（例如把门库约束当成优化范围传进 scope/target）。
+        # 只读 call.arguments，不参与任何路由。
+        try:
+            self.last_args = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            self.last_args = repr(call.arguments)
+        self.last_fallback_error = getattr(self.parser, "last_fallback_error", None)
         _t_exec = time.perf_counter()
         result = self.execute(call)
         result = self._maybe_auto_verify_transform(call, result)
@@ -2510,6 +2607,10 @@ def replay_suite(config: AgentConfig, start: int, end: int, *, suppress_stdout: 
         writer.writerow([
             "case", "prompt_idx", "task_type", "tool",
             "front_sec", "back_sec", "total_sec", "status",
+            # source: 这条 prompt 最终由谁解析（regex / llm / regex_fallback）。
+            # llm 模式下出现 regex_fallback 就说明该条是 LLM 失败后被兜底的，
+            # 不能拿它的结果作为「LLM 路由正确」的证据。fallback_error 记原因。
+            "source", "args", "fallback_error",
             "equivalent", "cost_metric", "manual_correct", "prompt",
         ])
 
@@ -2571,7 +2672,11 @@ def replay_suite(config: AgentConfig, start: int, end: int, *, suppress_stdout: 
                 writer.writerow([
                     f"test{case_num:02d}", idx, ttype, tool,
                     f"{front_sec:.2f}", f"{back_sec:.2f}", f"{front_sec + back_sec:.2f}",
-                    status, equiv, cost_metric, "", line,
+                    status,
+                    getattr(agent, "last_source", None) or "",
+                    getattr(agent, "last_args", None) or "",
+                    getattr(agent, "last_fallback_error", None) or "",
+                    equiv, cost_metric, "", line,
                 ])
             if suppress_stdout:
                 auto_note = ""
