@@ -17,6 +17,7 @@ from ir import NetlistIR
 from nx_probe import build_comb_graph, cell_node, net_node, node_to_readable
 from pyv_extractor import parse_verilog_to_ir
 from eda_transform import (
+    _cone_seed,
     boolean_expression,
     collapse_back_to_back_inverters,
     articulation_points_between,
@@ -331,7 +332,18 @@ class CircuitAnalyzer:
         return dist[t]
 
     def fanin_cone_cells(self, dst: str) -> List[str]:
-        target = self.normalize_node(dst)
+        """dst 的扇入锥里的组合门。
+
+        过 _cone_seed：dst 由 DFF.Q 驱动时组合图里没有祖先，旧实现恒返回 []
+        （test32#13 "How many gates are in the logic cone of output n12?" -> 0；
+        test38#19 "list all gates that contribute to this output" -> 0 gates）。
+        本方法只回答"X 的锥里有哪些门"这类【锥成员】问题。
+
+        注意隔壁的 max_fanin_depth 【故意不加】种子：它是 A21.2
+        "Combinational depth only; treat DFF.Q outputs as primary inputs"
+        明文管辖的深度口径，官方已经给过答案，不能动。
+        """
+        target = self.normalize_node(_cone_seed(self.ir, dst))
         upstream = nx.ancestors(self.graph, target)
         cells = [
             self.graph.nodes[node]["name"]

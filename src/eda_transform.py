@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import os
 import shutil
 import subprocess
 import tempfile
@@ -36,7 +37,16 @@ class IRWriter:
         rn = self._safe_names()
         em = lambda x: rn.get(x, x)
         lines: List[str] = []
-        lines.extend(self._dff_model())
+        # 【不要】在这里写 dff 的行为级模型（2026-07-16 移除）。
+        # 赛题 3.2.a：输出必须是"扁平、无层次、只有一个 top module"的门级网表，
+        # 允许的构造只有 8 个原语 + dff + wire + 常量；A5.4 明确 "The DFF will
+        # appear as a primitive gate"。原实现无条件在文件开头插一个
+        #   module dff(input RN, ..., output reg Q); always @(posedge CK ...) ... endmodule
+        # 于是每个 _out.v 都变成【两个模块、dff 在前、含行为级 always/output reg/<=】。
+        # 我们自己看不见，是因为 pyv_extractor 里有两处硬编码 `if name == "dff": continue`
+        # 把它跳过了 —— 官方的读取器没有这个特例。
+        # Alpha 实测后果：40 题里 38 题 SYNTAX_ERROR，Transform/Opt 全 0，连 test01
+        # 这种"只 load 再 write"的题都挂。
         ports = ", ".join(em(pp) for pp in self.ir.port_order)
         lines.append(f"module {self.ir.module_name}({ports});")
 
@@ -120,19 +130,6 @@ class IRWriter:
         if sig.width == 1:
             return ""
         return f"[{sig.msb}:{sig.lsb}] "
-
-    @staticmethod
-    def _dff_model() -> List[str]:
-        return [
-            "module dff(input RN, input SN, input CK, input D, output reg Q);",
-            "  always @(posedge CK or negedge RN) begin",
-            "    if (!RN) Q <= 1'b0;",
-            "    else if (!SN) Q <= 1'b1;",
-            "    else Q <= D;",
-            "  end",
-            "endmodule",
-            "",
-        ]
 
     @staticmethod
     def _chunks(items: List[str], size: int) -> Iterable[List[str]]:
@@ -667,12 +664,107 @@ def replace_gate_library(
     return {"scope": scope, "target": target, "to_library": to_library, "replaced_gates": replaced, "added_by_type": dict(added)}
 
 
+def _cone_through_dff_enabled() -> bool:
+    """锥语义开关。默认开；设 CONE_THROUGH_DFF=0/false/no 可退回旧行为做 A/B。
+
+    只影响【变换/优化】路径（_selected_cells 与 reduce_depth）。分析侧的锥
+    （eda_core 的 fanin_cone_cells 等）本函数一概不碰。
+    """
+    raw = os.environ.get("CONE_THROUGH_DFF", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _dff_q_to_d(ir: NetlistIR) -> Dict[str, str]:
+    """{DFF 的输出网 -> 同一个 DFF 的 D 端网}。
+
+    给 _cone_seed 当索引用。需要它是因为：_cone_seed 单次调用要线性扫 ir.cell_order，
+    放在“逐个输出位求锥”这类循环里就是 O(输出位数 × 门数)（test39 = 99 × 112k ≈ 11M
+    次），所以循环调用方先建一次这张表再传进去。
+    不缓存在 ir 上：ir 会被变换就地改写，缓存必然失效。
+    """
+    q2d: Dict[str, str] = {}
+    for name in ir.cell_order:                 # 按 cell_order 保证确定性
+        cell = ir.cells.get(name)
+        if cell is None or cell.cell_type != "dff":
+            continue
+        d = None
+        for pin, net in cell.inputs.items():
+            if pin.upper() == "D" and net:
+                d = net
+                break
+        for q in cell.outputs.values():        # Q / QN
+            if q not in q2d:
+                q2d[q] = d if d else q
+    return q2d
+
+
+def _cone_seed(ir: NetlistIR, target: Optional[str],
+               q2d: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """把 "the logic cone of X" 的锥起点解析成组合图里的真实起点。
+
+    背景：build_comb_graph() 不把 DFF 放进图（DFF 是时序边界）。于是当 X 恰好由
+    某个 DFF 的 Q 端驱动时，net:X 在组合图里【没有任何祖先】——锥恒为空：
+      * _selected_cells(cone, X) 选中 0 个门 -> replace_gate_library 静默 no-op
+        （公开集实测：test25#4 / test26#4 / test33#9 / test37#5 全部输出
+        "Replaced 0 gates."，且因为"什么都没改"CEC 照样 YES，所有既有的尺都看不见）；
+      * _max_depth(ir, X) 恒为 0 -> reduce_depth 的"未变小则回退"闸门 0 >= 0 恒
+        成立 -> ABC 已做好、CEC 已过的结果被整个丢弃（test33#19 即此因）。
+
+    语义依据（为什么该穿过驱动 X 的那个 DFF）：
+      * test33#19 的 cost function 明写是 "the depth of the cone of n8"，而 n8 由
+        dff g6059 驱动。若锥恒为空，这道优化题对所有队伍 cost 恒为 0，赛题第 5 节
+        的 cost_best/cost 变成 0/0，排名失去意义——出题人不会这样设计。
+      * test37 的 #4/#5/#6/#13/#17 五条 prompt 全都围绕 "cone of n8" 提问，其中
+        #13 要求 "What Boolean function does output n8 compute? Express it in terms
+        of the primary inputs" —— 若锥为空，这题无解。
+      * A21.2 "Combinational depth only; treat DFF.Q outputs as primary inputs"
+        管的是【往回遍历时遇到 DFF 就停、不进入上一周期】。本函数只穿过【驱动
+        target 自己的那一个】DFF，从它的 D 端起算；再往上遇到其它 DFF.Q 仍然停，
+        所以 A21.2 依然成立。
+
+    行为：
+      * X 由某 DFF 的输出端（Q / QN）驱动 -> 返回该 DFF 的 D 端网线；
+      * 其余一切情况（X 由组合门驱动 / X 是 PI / X 是常量 / X 不是网线名）
+        -> 原样返回 target，调用方行为逐字节不变。
+        （公开集里 test04/16/17/18/19/20/40 这几道 cone 题的 target 都由组合门
+        驱动，走的就是这条不变路径——已在 40 道真网表上逐个验过。）
+
+    【不要】把它塞进 _fanin_cells / max_fanin_depth / _collect_cone 里：
+      * max_fanin_depth 是 A21.2 明文管辖的深度口径，不能动；
+      * _collect_cone 是 Yosys miter 的取锥（A30 组合等价），不能动；
+      * dff_enable_hold_structures 传进 _fanin_cells 的已经是 D 端网，再穿一级
+        就会跳到上一个 DFF 之前，语义就错了。
+    所以本函数只在【回答"X 的锥"这个问题的那几个入口】上调用。
+    """
+    if not target or not _cone_through_dff_enabled():
+        return target
+    if q2d is not None:
+        return q2d.get(target, target)
+    # 未传索引：单点查询，线性扫一遍即可（按 cell_order 保证确定性）。
+    for name in ir.cell_order:
+        cell = ir.cells.get(name)
+        if cell is None or cell.cell_type != "dff":
+            continue
+        if target not in cell.outputs.values():
+            continue
+        for pin, net in cell.inputs.items():
+            if pin.upper() == "D" and net:
+                return net
+        return target
+    return target
+
+
 def _selected_cells(ir: NetlistIR, scope: str, target: Optional[str]) -> Set[str]:
     if scope == "cone" and target:
         graph = _build_graph(ir)
-        t = net_node(target) if target in ir.nets else cell_node(target)
+        seed = _cone_seed(ir, target)
+        t = net_node(seed) if seed in ir.nets else cell_node(seed)
         if t not in graph:
             return set()
+        # nx.ancestors(net:S) 已含驱动 S 的那个门本身（cell->net 有边），语义与旧
+        # 实现一致：锥包含驱动锥顶的那个门。seed==target 时结果逐字节不变。
         return {node_to_readable(n) for n in nx.ancestors(graph, t) if n.startswith("cell:")}
     return set(ir.cells)
 
@@ -856,8 +948,13 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
 
     # Cone-scoped requests should not optimize the whole design when the target cone
     # already meets the requested depth. This avoids an unnecessary full-design ABC run.
+    #
+    # 锥起点必须过 _cone_seed：target 由 DFF.Q 驱动时组合锥恒为 0，旧实现会在这里
+    # 直接返回 "already optimized at depth 0" —— ABC 一次都不跑。赛题指南 4.3 的
+    # 官方示例 "Optimize the logic cone of h so that the maximum depth is <= 5" 一旦
+    # h 是寄存器输出，就正中这个坑。
     if scope == "cone" and target:
-        current_depth = _max_depth(ir, target)
+        current_depth = _max_depth(ir, _cone_seed(ir, target))
         if max_depth is not None and current_depth <= max_depth:
             return {
                 **base,
@@ -896,8 +993,14 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
             # 设计恒为 0/偏小，导致下面的“未变小则回退”闸门恒触发，把 ABC 真做过的 reg2reg 深度优化
             # 整个丢弃（test23/24/29/30 报 kept_original 即此因）。改用 design_max_logic_depth 后，报数
             # 与回退判定都按评委实际会量的整设计组合深度进行。
-            reported_original_depth = _max_depth(snapshot, target) if scope == "cone" and target else design_max_logic_depth(snapshot)
-            reported_depth = _max_depth(ir, target) if scope == "cone" and target else design_max_logic_depth(ir)
+            # 锥题的深度必须从 _cone_seed 起量（见 _cone_seed 的说明）。种子在 snapshot
+            # 和 ir 上【分别】解析：ABC 读回时 DFF.D 可能被别名重连到别的网（rebuild_comb_from_abc
+            # 的 buf 消解），两边各取各自当前的 D 端，量到的才是同一个语义量
+            # （"驱动 target 的那个 DFF 之前的那片组合逻辑的深度"）的前后值。
+            _seed_snap = _cone_seed(snapshot, target) if (scope == "cone" and target) else None
+            _seed_ir = _cone_seed(ir, target) if (scope == "cone" and target) else None
+            reported_original_depth = _max_depth(snapshot, _seed_snap) if (scope == "cone" and target) else design_max_logic_depth(snapshot)
+            reported_depth = _max_depth(ir, _seed_ir) if (scope == "cone" and target) else design_max_logic_depth(ir)
 
             payload = {
                 **base,
@@ -1271,14 +1374,19 @@ def list_gates_by_type(ir: NetlistIR, gate_type: str) -> Dict[str, Any]:
 
 
 def cone_gate_type_count(ir: NetlistIR, target: str) -> Dict[str, Any]:
-    cells = _fanin_cells(ir, target)
+    # "Report the number of each gate type in the cone of n8" —— 回答"X 的锥"的入口，
+    # 过 _cone_seed（test33#10 / test37#4 / test37#6 / test38#18：这些 target 都是
+    # DFF.Q，旧实现恒答 "contains no gates"，与变换侧刚在同一个锥上替换掉的门自相矛盾）。
+    cells = _fanin_cells(ir, _cone_seed(ir, target))
     counts = Counter(ir.cells[name].cell_type.upper() for name in cells)
     return {"target": target, "gate_count": len(cells), "by_type": dict(counts)}
 
 
 def shared_fanin_cone(ir: NetlistIR, left: str, right: str) -> Dict[str, Any]:
-    l = set(_fanin_cells(ir, left))
-    r = set(_fanin_cells(ir, right))
+    # 两边都是"X 的锥"，各自过种子（test31#9：n16 由 DFF 驱动，旧实现交集恒为空）。
+    q2d = _dff_q_to_d(ir)
+    l = set(_fanin_cells(ir, _cone_seed(ir, left, q2d)))
+    r = set(_fanin_cells(ir, _cone_seed(ir, right, q2d)))
     shared = sorted(l & r, key=lambda name: ir.cell_order.index(name) if name in ir.cell_order else 10**9)
     return {"left": left, "right": right, "gate_count": len(shared), "gates": shared}
 
@@ -1452,10 +1560,13 @@ def deepest_output(ir: NetlistIR) -> Dict[str, Any]:
 
 def largest_fanin_cone_output(ir: NetlistIR) -> Dict[str, Any]:
     graph = _build_graph(ir)  # 只建一次图，供所有输出位复用
+    q2d = _dff_q_to_d(ir)     # 只建一次索引：逐位调 _cone_seed 会是 O(输出位×门数)
     values = []
     for sig in _signals(ir, "output"):
         for bit in _signal_bits(ir, sig.name):
-            values.append((bit, len(_fanin_cells(ir, bit, graph=graph))))
+            # "Which output has the largest fanin cone" —— 同样是"X 的锥"，过种子。
+            # 输出全由 DFF 驱动的设计，旧实现每位都是 0，答案退化成"随便挑一个"。
+            values.append((bit, len(_fanin_cells(ir, _cone_seed(ir, bit, q2d), graph=graph))))
     if not values:
         return {"output": None, "gate_count": 0}
     out, count = max(values, key=lambda item: item[1])
@@ -1632,7 +1743,12 @@ def boolean_expression(ir: NetlistIR, target: str, limit: int = 2000) -> Dict[st
 
 
 def signal_dependency(ir: NetlistIR, output: str, input: str) -> Dict[str, Any]:
-    cells = set(_fanin_cells(ir, output))
+    # "Does output n8 depend on input n1?" —— 问的是 output 的锥里有没有 input，
+    # 同样是"X 的锥"，过种子（test33#13：n8 是 DFF.Q，旧实现锥为空 -> 对任何输入
+    # 都恒答 NO，这题就没有意义了）。
+    # 注意：n1 这类【异步复位】只接 DFF 的 .RN 引脚、不是任何组合门的输入，所以按
+    # A30 的组合等价口径它仍然答 NO —— 这是口径问题，不是本次修的空锥问题。
+    cells = set(_fanin_cells(ir, _cone_seed(ir, output)))
     depends = any(input == net or net.startswith(input + "[") for cell in cells for net in ir.cells[cell].inputs.values())
     return {"output": output, "input": input, "depends": depends}
 

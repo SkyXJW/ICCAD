@@ -93,9 +93,18 @@ def _abc_timeout() -> int:
 # 结果只会不如满跑，绝不会比不做更差，也不可能违反任何硬约束（CEC 与「未变小则回退」
 # 闸门都在下游，与本预算正交）。
 #
-# 设 0 或负数 = 不限（完全恢复扩池后的旧行为）。默认 240s，给 blif 写出、deepcopy
+# 设 0 或负数 = 不限（完全恢复扩池后的旧行为）。默认 180s，给 blif 写出、deepcopy
 # 快照、rebuild、CEC 留出余量（它们都不在本预算内）。
-_DEFAULT_BESTOF_BUDGET_SEC = 240.0
+#
+# 2026-07-16：240 -> 180。原来 240 的假设是"后处理约 60s"，但锥语义修好之后，
+# 锥题的 _gate_library_satisfied 不再真空成立，会真的去跑 replace_gate_library +
+# 第二次 CEC —— test33#19 实测 236s -> 267s，只剩 33s 余量（267/300 = 89%），
+# TSRI 机器慢一点就超时归零。
+# 180 的代价 ≈ 0：全 40 题里只有 test33#19 会碰到这个预算（第二慢的 test28#7
+# 整条请求才 90s、它的 ABC 循环约 85s，要慢到 2.1 倍才会碰到 180），而 test33#19
+# 本来就是 kept_original（整设计 ABC 压不动 n8 那个 17 门的锥，见 reduce_depth 的
+# 说明），少跑几个候选一分不损。改完 test33#19 约 217s，余量 83s。
+_DEFAULT_BESTOF_BUDGET_SEC = 180.0
 
 
 def _bestof_budget() -> float:

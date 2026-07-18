@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import certifi
@@ -2546,8 +2546,38 @@ def _task_type(tool: Optional[str]) -> str:
     return "other"
 
 
+# 变换题的“工作量”键：这些数原本就躺在各变换工具的返回值里，只是从没被写进报表。
+# 逐个对着 eda_transform.py 的 return 字典核过；顺序即展示顺序。
+# 值为 list 的键（如 reported_gates）按长度计数。
+_WORK_KEYS: Tuple[str, ...] = (
+    "replaced_gates",      # replace_gate_library
+    "reported_gates",      # constant_propagation（list）
+    "eliminated_gates",    # constant_propagation
+    "collapsed_pairs",     # collapse_back_to_back_inverters
+    "added_buffers",       # limit_fanout / insert_dedicated_buffers
+    "removed_gates",       # remove_dangling_logic
+    "removed_wires",       # remove_dangling_logic
+    "merged_gates",        # merge_*（一般以 optimization_ 前缀出现，留作兜底）
+)
+
+
 def _cost_metric(tool: Optional[str], result: Any) -> str:
-    """优化题的 cost 变化摘要（供人一眼看出优化效果）。非优化题返回空串。"""
+    """每道题的“做了多少事”摘要。
+
+    优化题报 cost 变化；**变换题报工作量**（2026-07-15 新增）。
+
+    为什么变换题也要报：原实现只处理 optimization_* 前缀，transformation_* 一律
+    返回空串，于是 `replaced_gates: 0` 这种“成功地什么都没干”**在报表上完全不可见**。
+    而 auto-CEC / verify_equiv / analysis_check / regex≡hybrid 逐格比对这几把尺量的
+    都是“有没有做错”，对 no-op 全部判 PASS —— no-op 是整套体系的结构性盲区
+    （公开集实测有 5 道题在空转，藏了八天没人看见）。这一列把它变刺眼。
+
+    [NO-OP] 只是提示“这条 prompt 什么都没改，请人工确认是否应该如此”，
+    **不等于 bug**（例如 constant_propagation 在没有常量的网表上返回 0 就是对的）。
+
+    本函数只被 replay_suite 用来写 dev 报表 run_report.csv，
+    **不参与评委要读的 <case>.log / #RESPONSE**，所以对提交行为零影响。
+    """
     if not isinstance(result, dict):
         return ""
     if tool == "optimization_reduce_depth":
@@ -2564,6 +2594,32 @@ def _cost_metric(tool: Optional[str], result: Any) -> str:
         if "gate_count" in result:
             return f"gates={result.get('gate_count')} ({result.get('status','')})"
         return result.get("status", "")
+    if tool and tool.startswith("transformation_"):
+        parts: List[str] = []
+        touched = 0
+        found = False
+        for key in _WORK_KEYS:
+            if key not in result:
+                continue
+            val = result[key]
+            if isinstance(val, bool):          # bool 是 int 的子类，先排除
+                continue
+            if isinstance(val, int):
+                count = val
+            elif isinstance(val, (list, tuple, set, dict)):
+                count = len(val)
+            else:
+                continue
+            found = True
+            parts.append(f"{key}={count}")
+            touched += count
+        if not found:
+            return ""
+        if result.get("report_only"):
+            parts.append("(report_only)")
+        elif touched == 0:
+            parts.append("[NO-OP]")
+        return " ".join(parts)
     return ""
 
 
