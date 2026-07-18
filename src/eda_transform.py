@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -769,6 +770,189 @@ def _selected_cells(ir: NetlistIR, scope: str, target: Optional[str]) -> Set[str
     return set(ir.cells)
 
 
+@dataclass
+class _CombConeSlice:
+    ir: NetlistIR
+    seed: str
+    selected_cells: Set[str]
+    boundary_inputs: Tuple[str, ...]
+    boundary_outputs: Tuple[str, ...]
+
+
+def _extract_comb_cone(ir: NetlistIR, selected_cells: Set[str], seed: str) -> _CombConeSlice:
+    """Extract selected combinational cells as a standalone, explicitly bounded IR."""
+    if not selected_cells:
+        raise ValueError("target cone contains no combinational cells")
+
+    ir.rebuild_indices()
+    ordered_cells: List[str] = []
+    consumed: List[str] = []
+    produced: List[str] = []
+    consumed_seen: Set[str] = set()
+    produced_seen: Set[str] = set()
+
+    for name in ir.cell_order:
+        if name not in selected_cells:
+            continue
+        cell = ir.cells.get(name)
+        if cell is None:
+            raise ValueError(f"selected cone cell {name!r} is missing")
+        if cell.cell_type == "dff":
+            raise ValueError(f"selected cone unexpectedly contains DFF {name!r}")
+        ordered_cells.append(name)
+        for net in cell.inputs.values():
+            if net not in consumed_seen:
+                consumed_seen.add(net)
+                consumed.append(net)
+        for net in cell.outputs.values():
+            if net not in produced_seen:
+                produced_seen.add(net)
+                produced.append(net)
+
+    if set(ordered_cells) != selected_cells:
+        missing = sorted(selected_cells - set(ordered_cells))
+        raise ValueError(f"selected cone cells absent from cell_order: {missing[:4]}")
+    if seed not in produced_seen:
+        raise ValueError(f"cone seed {seed!r} is not driven by the selected region")
+
+    for net in consumed_seen | produced_seen:
+        if net not in CONSTANTS and len(ir.drivers.get(net, [])) > 1:
+            raise ValueError(f"cone net {net!r} has multiple drivers")
+
+    boundary_inputs = tuple(
+        net for net in consumed
+        if net not in produced_seen and net not in CONSTANTS
+    )
+    po_nets = _primary_output_nets(ir)
+    boundary_output_set: Set[str] = {seed}
+    for net in produced:
+        if net in po_nets or any(ref.cell not in selected_cells for ref in ir.loads.get(net, [])):
+            boundary_output_set.add(net)
+    boundary_outputs = tuple(net for net in produced if net in boundary_output_set)
+
+    cone = NetlistIR(module_name="__abc_cone__")
+    cone.add_constant_nets()
+    input_set = set(boundary_inputs)
+    output_set = set(boundary_outputs)
+    net_seen: Set[str] = set()
+    for net in consumed + produced:
+        if net in CONSTANTS or net in net_seen:
+            continue
+        net_seen.add(net)
+        kind = "input" if net in input_set else "output" if net in output_set else "wire"
+        cone.add_signal(net, kind)
+        if kind in ("input", "output"):
+            cone.port_order.append(net)
+    for name in ordered_cells:
+        cone.add_cell(copy.deepcopy(ir.cells[name]))
+    cone.rebuild_indices()
+
+    return _CombConeSlice(cone, seed, set(selected_cells), boundary_inputs, boundary_outputs)
+
+
+def _cone_abc_library(
+    ir: NetlistIR,
+    optimization_target: str,
+    selected_cells: Set[str],
+    library: Optional[str],
+    lib_scope: Optional[str],
+    lib_target: Optional[str],
+) -> Optional[str]:
+    """Return the restricted library iff it applies to this exact cone region."""
+    if not library:
+        return None
+    if lib_scope in (None, "design"):
+        return library
+    if lib_scope != "cone":
+        return None
+    constrained_target = lib_target or optimization_target
+    try:
+        constrained_cells = _selected_cells(ir, "cone", constrained_target)
+    except Exception:
+        return None
+    return library if constrained_cells == selected_cells else None
+
+
+def _splice_comb_cone(parent: NetlistIR, cone_slice: _CombConeSlice) -> Dict[str, Any]:
+    """Replace exactly one parent combinational cone with a rebuilt standalone cone."""
+    cone = cone_slice.ir
+    input_set = set(cone_slice.boundary_inputs)
+    output_set = set(cone_slice.boundary_outputs)
+    actual_inputs = {name for name, sig in cone.signals.items() if sig.direction == "input"}
+    actual_outputs = {name for name, sig in cone.signals.items() if sig.direction == "output"}
+    if actual_inputs != input_set or actual_outputs != output_set:
+        raise ValueError("optimized cone interface does not match extracted boundary")
+
+    cone.rebuild_indices()
+    for net in input_set:
+        if cone.drivers.get(net):
+            raise ValueError(f"optimized cone drives boundary input {net!r}")
+    for net in output_set:
+        if not cone.drivers.get(net):
+            raise ValueError(f"optimized cone left boundary output {net!r} undriven")
+
+    selected = cone_slice.selected_cells
+    selected_positions = [i for i, name in enumerate(parent.cell_order) if name in selected]
+    if not selected_positions:
+        raise ValueError("selected parent cone disappeared before splice")
+    insert_at = min(selected_positions)
+    for name in selected:
+        parent.cells.pop(name, None)
+    parent.cell_order = [name for name in parent.cell_order if name not in selected]
+
+    ctx = TransformContext(parent)
+    net_map: Dict[str, str] = {name: name for name in input_set | output_set | CONSTANTS}
+    reserved: Set[str] = set()
+    internal_count = 0
+
+    def mapped_net(net: str) -> str:
+        nonlocal internal_count
+        if net in net_map:
+            return net_map[net]
+        name = ctx.unique_name(f"abc_cone_net_{internal_count}", reserved)
+        internal_count += 1
+        reserved.add(name)
+        parent.add_signal(name, "wire")
+        net_map[net] = name
+        return name
+
+    imported: List[Cell] = []
+    for idx, local_name in enumerate(cone.cell_order):
+        local = cone.cells.get(local_name)
+        if local is None:
+            continue
+        if local.cell_type == "dff":
+            raise ValueError("optimized combinational cone unexpectedly contains a DFF")
+        cell_name = ctx.unique_name(f"abc_cone_cell_{idx}", reserved)
+        reserved.add(cell_name)
+        imported.append(Cell(
+            name=cell_name,
+            cell_type=local.cell_type,
+            inputs={pin: mapped_net(net) for pin, net in local.inputs.items()},
+            outputs={pin: mapped_net(net) for pin, net in local.outputs.items()},
+            port_order=list(local.port_order),
+            src="abc-cone-mapped",
+        ))
+
+    imported_names: List[str] = []
+    for cell in imported:
+        parent.cells[cell.name] = cell
+        imported_names.append(cell.name)
+    parent.cell_order[insert_at:insert_at] = imported_names
+    parent.rebuild_indices()
+    for net in output_set:
+        if not parent.drivers.get(net):
+            raise ValueError(f"spliced parent left boundary output {net!r} undriven")
+
+    return {
+        "cone_cells_selected": len(selected),
+        "cone_cells_inserted": len(imported_names),
+        "cone_boundary_inputs": len(input_set),
+        "cone_boundary_outputs": len(output_set),
+        "cone_internal_nets_renamed": internal_count,
+    }
+
+
 def _gate_allowed(gate: str, library: str) -> bool:
     allowed = {
         "nand_not": {"nand", "not"},
@@ -966,23 +1150,64 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
                 "message": f"Cone of {target} is already optimized at depth {current_depth}.",
             }
 
-    # 1. ABC 深度优化；result 里带 ABC 真实的 before/after lev
-    #    若该题带门库硬约束(library 非 None),直接让 ABC 在受限门库下做深度优化,
-    #    这样 depth 已是受限库下可达的最优,避免"先全库优化、再拆库把层数加回去"。
-    #    _restricted_genlib_text 不认识的 library 会让 reduce_depth_abc 回退到全库,
-    #    下游 3b 仍会做一次归一化兜底,所以这一步只会更好、不会更差。
-    _abc_lib = library if (library and (lib_scope in (None, "design") or scope == "design")) else None
-    result = reduce_depth_abc(ir, max_depth=max_depth, library=_abc_lib)
-    opt_v = result.pop("_optimized_verilog", "")
-    if not opt_v:
-        return {**base, **result, "status": "kept_original",
-                "message": "ABC produced no optimized netlist; original kept."}
-
-    # 2. 快照后把优化结果读回 ir（DFF 原样保留）
+    # 1. ABC 深度优化。cone scope 先抽成独立组合子网，只让 ABC 处理目标锥；
+    #    design scope 保持原来的整设计流程。
     snapshot = copy.deepcopy(ir)
-    rebuild_comb_from_abc(ir, opt_v)
+    cone_diag: Dict[str, Any] = {}
+    if scope == "cone" and target:
+        try:
+            seed = _cone_seed(ir, target)
+            if not seed:
+                raise ValueError("cone target has no resolvable seed")
+            selected = _selected_cells(ir, "cone", target)
+            cone_slice = _extract_comb_cone(ir, selected, seed)
+            _abc_lib = _cone_abc_library(
+                ir, target, selected, library, lib_scope, lib_target
+            )
+            cone_diag = {
+                "abc_region": "cone",
+                "cone_cells_selected": len(selected),
+                "cone_boundary_inputs": len(cone_slice.boundary_inputs),
+                "cone_boundary_outputs": len(cone_slice.boundary_outputs),
+            }
+            if _abc_lib:
+                cone_diag["abc_library"] = _abc_lib
+            result = reduce_depth_abc(cone_slice.ir, max_depth=max_depth, library=_abc_lib)
+            opt_v = result.pop("_optimized_verilog", "")
+            if not opt_v:
+                ir.__dict__.clear()
+                ir.__dict__.update(snapshot.__dict__)
+                return {
+                    **base, **result, **cone_diag,
+                    "status": "kept_original",
+                    "original_depth": current_depth,
+                    "depth": current_depth,
+                    "message": "ABC produced no optimized cone netlist; original kept.",
+                }
+            rebuild_comb_from_abc(cone_slice.ir, opt_v)
+            cone_diag.update(_splice_comb_cone(ir, cone_slice))
+            result.update(cone_diag)
+        except Exception as exc:
+            ir.__dict__.clear()
+            ir.__dict__.update(snapshot.__dict__)
+            return {
+                **base,
+                **cone_diag,
+                "status": "kept_original",
+                "reason": "cone_local_optimization_failed",
+                "message": f"Cone-local ABC preparation or splice failed; original kept: {exc}",
+            }
+    else:
+        # 若该题带门库硬约束，直接让 ABC 在受限门库下做深度优化。
+        _abc_lib = library if (library and (lib_scope in (None, "design") or scope == "design")) else None
+        result = reduce_depth_abc(ir, max_depth=max_depth, library=_abc_lib)
+        opt_v = result.pop("_optimized_verilog", "")
+        if not opt_v:
+            return {**base, **result, "status": "kept_original",
+                    "message": "ABC produced no optimized netlist; original kept."}
+        rebuild_comb_from_abc(ir, opt_v)
 
-    # 3. CEC 验功能等价
+    # 2. 对拼回后的完整设计做 CEC；snapshot 是变换前的完整父设计。
     eq = cec_equivalent(ir, snapshot)
     if eq.get("equivalent") is True:
         def _finish_depth_result(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1055,17 +1280,31 @@ def reduce_depth(ir: NetlistIR, target: Optional[str] = None, max_depth: Optiona
             return _finish_depth_result({"library": library, "library_via": "abc_restricted_genlib"})
         if library:
             _ls = lib_scope or scope
-            _lt = lib_target if (lib_scope == "cone") else target
-            post_abc = copy.deepcopy(ir)
+            _lt = (lib_target or target) if (lib_scope == "cone") else target
             replace_gate_library(ir, scope=_ls, target=_lt, to_library=library)
             ir.rebuild_indices()
             eq2 = cec_equivalent(ir, snapshot)
-            if eq2.get("equivalent") is True:
+            if eq2.get("equivalent") is True and _gate_library_satisfied(
+                ir, library, scope=_ls, target=_lt
+            ):
                 return _finish_depth_result({"library": library})
-            # 归一化后竟不等价(理论上不应发生) -> 回退到仅深度优化的结果, 保留功能正确
+            # 门库是硬约束：归一化不等价或仍含非法门时必须整图回退，不能保留仅深度优化结果。
             ir.__dict__.clear()
-            ir.__dict__.update(post_abc.__dict__)
-            return _finish_depth_result({"library_normalize": "skipped_failed_cec"})
+            ir.__dict__.update(snapshot.__dict__)
+            reason = (
+                "library_constraint_unsatisfied"
+                if eq2.get("equivalent") is True
+                else "library_normalize_failed_cec"
+            )
+            return {
+                **base,
+                **result,
+                "status": "kept_original",
+                "reason": reason,
+                "equivalence": eq2.get("status"),
+                "library": library,
+                "message": "Gate-library hard constraint could not be preserved; original kept.",
+            }
         return _finish_depth_result()
 
     # 4. 不等价 / UNKNOWN → 回滚，深度报回优化前
