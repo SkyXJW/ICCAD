@@ -12,6 +12,7 @@ import ssl
 import contextlib
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -165,6 +166,18 @@ class AgentConfig:
     # both gpt-4o-mini and claude-haiku without this. Turn on (fc_strict: true) only
     # after validating against the live API on the VM.
     fc_strict: bool = False
+    # ── Iterative tool-call validation (Section: validation loops) ──
+    # When enabled, the LLM's Function Calling result goes through two validation
+    # stages (tool name → tool args), each cross-checked by two LLM reviewers from
+    # different angles, with up to N retries per stage.  Set to False to restore the
+    # original single-pass behaviour.
+    enable_tool_validation: bool = False
+    tool_name_validation_retries: int = 3
+    tool_args_validation_retries: int = 3
+    validation_budget_sec: float = 20.0        # 校验阶段墙钟预算，超了立即收敛；
+                                               # 防止多轮串行顶穿官方单条 60s/300s 时限
+    verbose_validation: bool = False   # 打印每轮校验的详细过程
+    validation_log_file: Optional[str] = None  # 校验日志输出路径；为空则打到 stderr
 
 
 def _strip_quotes(value: str) -> str:
@@ -320,6 +333,13 @@ def load_agent_config(config_path: Optional[Path]) -> AgentConfig:
         auto_verify_transforms=_as_bool(_first_value(merged, "auto_verify_transforms", default=False)),
         allow_absolute_output_paths=_as_bool(_first_value(merged, "allow_absolute_output_paths", default=False)),
         fc_strict=_as_bool(_first_value(merged, "fc_strict", default=False)),
+        # ── 工具调用迭代校验（此前这几项没有从配置里读，yml 写了也不生效）──
+        enable_tool_validation=_as_bool(_first_value(merged, "enable_tool_validation", default=False)),
+        tool_name_validation_retries=int(_first_value(merged, "tool_name_validation_retries", default=3)),
+        tool_args_validation_retries=int(_first_value(merged, "tool_args_validation_retries", default=3)),
+        verbose_validation=_as_bool(_first_value(merged, "verbose_validation", default=False)),
+        validation_log_file=(lambda v: str(v) if v else None)(_first_value(merged, "validation_log_file", default=None)),
+        validation_budget_sec=float(_first_value(merged, "validation_budget_sec", default=20.0)),
     )
 
 
@@ -840,6 +860,343 @@ def build_llm_review_prompt(tool_contract: Dict[str, Any]) -> str:
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Iterative Tool-Call Validation — prompt builders
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _compact_tool_list() -> List[Dict[str, Any]]:
+    """Return a minimal name+description summary of every available tool (used by
+    tool-name validation template A so the LLM can see the full menu)."""
+    items: List[Dict[str, Any]] = []
+    for name in sorted(ALLOWED_TOOLS):
+        desc = _TOOL_DESC_OVERRIDES.get(name, "")
+        items.append({"name": name, "description": desc})
+    return items
+
+
+def _tool_schema_for_validation(tool_contract: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+    """Return the full schema entry (description + when_to_use + parameters) for
+    *tool_name*, including the two protocol tools."""
+    protocol = {
+        "begin_testcase": {
+            "name": "begin_testcase",
+            "description": "Initialize a testcase and start writing responses to <case_name>.log.",
+            "when_to_use": "Use for requests like 'This is the beginning of a new testcase. The case name is test03.'",
+            "parameters": {
+                "type": "object",
+                "properties": {"case_name": {"type": "string"}},
+                "required": ["case_name"],
+            },
+        },
+        "design_load": {
+            "name": "design_load",
+            "description": "Load a testcase design. For LLM parsing, return file_name and directory exactly from the request; the agent resolves the full path.",
+            "when_to_use": "Use for requests asking to load/read a design from a file in a directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {"file_name": {"type": "string"}, "directory": {"type": "string"}},
+                "required": ["file_name", "directory"],
+            },
+        },
+    }
+    if tool_name in protocol:
+        return protocol[tool_name]
+    for tool in tool_contract.get("tools", []):
+        if tool.get("name") == tool_name:
+            entry = dict(tool)
+            if tool_name in _TOOL_DESC_OVERRIDES:
+                entry["description"] = _TOOL_DESC_OVERRIDES[tool_name]
+                entry.pop("when_to_use", None)
+            return entry
+    return {}
+
+
+def _build_tool_name_validation_prompt_a(request: str, tool_name: str, tool_contract: Dict[str, Any]) -> Tuple[str, str]:
+    """Template A (contract-lens): full schema of the selected tool + all tool names."""
+    schema = _tool_schema_for_validation(tool_contract, tool_name)
+    all_tools = _compact_tool_list()
+    system = (
+        "You are an EDA tool-selection auditor (Contract Lens). "
+        "Your job: given a user request and a candidate tool name, decide whether "
+        "the selected tool CAN satisfy the request according to its official contract "
+        "(description + when_to_use + parameters).\n\n"
+        "Rules:\n"
+        "- Focus on whether the tool's PURPOSE matches the request, NOT on whether "
+        "the arguments are correct (arguments are checked separately).\n"
+        "- If the tool is wrong, pick the CORRECT tool from the available-tools list.\n"
+        "- Return ONLY a JSON object with exactly three keys:\n"
+        '  {"valid": true/false, "tool": "corrected_or_original_name", "reason": "brief explanation"}\n'
+        "- Preserve the original signal/gate/file names in the reason, do not invent new ones.\n"
+    )
+    user = json.dumps(
+        {
+            "request": request,
+            "candidate_tool": tool_name,
+            "candidate_tool_contract": schema,
+            "all_available_tools": all_tools,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return system, user
+
+
+def _build_tool_name_validation_prompt_b(request: str, tool_name: str) -> Tuple[str, str]:
+    """Template B (routing-rules lens): key disambiguation rules from the routing guide."""
+    # Extract the most relevant rule sections — the critical disambiguation pairs
+    critical_sections = [
+        "=== CRITICAL: Count-vs-Delta",
+        "=== CRITICAL: Full-design vs Cone",
+        "=== CRITICAL: Fanout — Signal vs Gate",
+        "=== CRITICAL: Deepest vs Largest",
+        "=== CRITICAL: Constant Propagation vs List Gates",
+        "=== CRITICAL: Redundant (merge) vs Dangling (remove)",
+        "=== File/Control ===",
+        "=== Paths ===",
+        "=== Cut / Articulation ===",
+        "=== Depth (analysis_max_logic_depth and variants) ===",
+        "=== Library Replacement",
+        "=== Fanout Transformations ===",
+        "=== Other Transformations ===",
+        "=== Depth Optimization",
+        "=== Boolean / Formal ===",
+        "=== Functional-Preservation Clauses ===",
+    ]
+    relevant_rules: List[str] = []
+    for section in _LLM_ROUTING_GUIDE.split("\n\n"):
+        for keyword in critical_sections:
+            if keyword in section and section not in relevant_rules:
+                relevant_rules.append(section.strip())
+                break
+
+    system = (
+        "You are an EDA tool-selection auditor (Routing-Rules Lens). "
+        "Your job: given a user request and a candidate tool name, check whether "
+        "the tool follows the EDA routing rules — especially the critical "
+        "disambiguation pairs (Count-vs-Delta, Full-design-vs-Cone, "
+        "Deepest-vs-Largest, Constant Propagation-vs-List Gates, etc.).\n\n"
+        "Rules:\n"
+        "- Judge by the full predicate and verb tense, never from a single word.\n"
+        "- If the tool violates any routing rule, mark it invalid and name the correct tool.\n"
+        "- Return ONLY a JSON object with exactly three keys:\n"
+        '  {"valid": true/false, "tool": "corrected_or_original_name", "reason": "brief explanation"}\n'
+        "- Preserve the original signal/gate/file names in the reason.\n"
+    )
+    routing_text = "\n\n".join(relevant_rules)
+    user = json.dumps(
+        {
+            "request": request,
+            "candidate_tool": tool_name,
+            "routing_rules": routing_text,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return system, user
+
+
+def _build_tool_args_validation_prompt_a(request: str, tool_name: str, arguments: Dict[str, Any], tool_contract: Dict[str, Any]) -> Tuple[str, str]:
+    """Template A (schema-lens): check every argument against the parameter schema,
+    with full tool description so the LLM understands what each parameter means."""
+    schema = _tool_schema_for_validation(tool_contract, tool_name)
+    params_schema = schema.get("parameters", {})
+    tool_desc = schema.get("description", "")
+    tool_when = schema.get("when_to_use", "")
+    required = params_schema.get("required", [])
+    properties = params_schema.get("properties", {})
+
+    system = (
+        "You are an EDA parameter auditor (Schema Lens). "
+        "Your job: given a tool's full description, its parameter schema (each parameter "
+        "has a description explaining what it means), and the candidate arguments, "
+        "decide whether the arguments are legal and semantically correct.\n\n"
+        "Checklist:\n"
+        "- Every REQUIRED parameter must be present and non-empty.\n"
+        "- Each parameter value must match its described purpose (e.g. if a parameter "
+        "is described as 'Target net or signal, e.g. n15', the value must be an actual "
+        "signal name from the request, not a gate type or library name).\n"
+        "- Enum values must be one of the documented choices.\n"
+        "- Integer values must be within expected bounds.\n"
+        "- Remove only parameters that are NOT part of this tool's schema. "
+        "Presentation-shape parameters such as answer_style are legitimate even when "
+        "the request never spells them out — never strip them.\n"
+        "- answer_style controls the SHAPE of the answer and is inferred from how the "
+        "question is asked:\n"
+        "    * per-type breakdown asked ('broken down by gate type', 'each gate type') "
+        "-> answer_style must be ABSENT so the full breakdown is reported;\n"
+        "    * one gate type asked ('how many NAND gates') -> '<type>_only';\n"
+        "    * a bare total asked ('total gate count') -> 'total_only';\n"
+        "    * 'how many'/'the number of' where a list would otherwise print "
+        "-> 'count_only'.\n"
+        "  Reporting a single number when a breakdown was requested is a WRONG answer, "
+        "and so is printing a list when a count was requested.\n\n"
+        "Return ONLY a JSON object:\n"
+        '  {"valid": true/false, "arguments": {<corrected or original args>}, "reason": "brief explanation"}\n'
+        "- If valid, return the arguments unchanged. If invalid, fix them.\n"
+        "- Preserve every net/signal/bus-bit/gate name exactly as in the request.\n"
+    )
+    user = json.dumps(
+        {
+            "request": request,
+            "tool": tool_name,
+            "tool_description": tool_desc,
+            "tool_when_to_use": tool_when,
+            "parameter_schema": {"required": required, "properties": properties},
+            "candidate_arguments": arguments,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return system, user
+
+
+def _build_tool_args_validation_prompt_b(request: str, tool_name: str, arguments: Dict[str, Any], tool_contract: Dict[str, Any]) -> Tuple[str, str]:
+    """Template B (semantic-lens): check whether argument values accurately reflect the
+    request text, with full tool context so the LLM knows what each field is for."""
+    schema = _tool_schema_for_validation(tool_contract, tool_name)
+    tool_desc = schema.get("description", "")
+    tool_when = schema.get("when_to_use", "")
+    params_schema = schema.get("parameters", {})
+    properties = params_schema.get("properties", {})
+
+    system = (
+        "You are an EDA parameter auditor (Semantic Lens). "
+        "Your job: given the original user request, a tool with its full description "
+        "and parameter definitions, and candidate arguments, decide whether the "
+        "argument VALUES were accurately extracted from the request text.\n\n"
+        "Checklist:\n"
+        "- Every signal/gate/net name in the arguments must appear EXACTLY in the request "
+        "(no hallucinated names).\n"
+        "- Each argument must match the PURPOSE described in the tool's parameter "
+        "definitions (e.g. 'target' receives a signal name, 'from_gate' receives a "
+        "gate type like 'or'/'xor', 'to_library' receives a library name like "
+        "'nand_not'/'nor_not').\n"
+        "- Numeric values (max_depth, threshold, max_fanout) must match the request numbers.\n"
+        "- Gate types must match what the request says (e.g. 'and' not 'nand').\n"
+        "- Bus bits must preserve the exact bracket notation (e.g. n0[1]).\n"
+        "- Constants must use Verilog format \"1'b0\"/\"1'b1\", never \"0\"/\"1\".\n"
+        "- Boolean flags (report_only, dedicated) must reflect the request intent.\n"
+        "- Do NOT invent NAMES (signals, gates, nets) absent from the request.\n"
+        "- Presentation-shape parameters (answer_style) are the exception: they are "
+        "INFERRED from the phrasing rather than quoted from it, so add or keep them when "
+        "the wording calls for it -- 'how many'/'the number of' -> a count, 'broken down "
+        "by gate type' -> full breakdown (answer_style absent), 'how many NAND gates' -> "
+        "'<type>_only', 'does every path ... pass through X' -> 'all_paths_through'.\n\n"
+        "Return ONLY a JSON object:\n"
+        '  {"valid": true/false, "arguments": {<corrected or original args>}, "reason": "brief explanation"}\n'
+        "- If valid, return arguments unchanged. If invalid, fix them.\n"
+    )
+    user = json.dumps(
+        {
+            "request": request,
+            "tool": tool_name,
+            "tool_description": tool_desc,
+            "tool_when_to_use": tool_when,
+            "parameter_definitions": properties,
+            "candidate_arguments": arguments,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return system, user
+
+
+# ── helper: call a validation LLM (JSON mode, no function-calling tools) ──
+
+# ── 答案形态（answer_style）确定性回填 ────────────────────────────
+# 背景：answer_style 决定「答案长什么样」——报总数、报分类明细、只报某类门、
+# 还是报计数而非清单。它不改变工具的计算结果，但直接决定判分时答案对不对。
+#
+# 两个已实测的缺口：
+#   1) analysis_count_gates 的 schema 描述写着「Whole-design total -> 'total_only'」，
+#      而公开集有 31 条 prompt 是「report the total count broken down by gate type」——
+#      LLM 看到 "total count" 就填 total_only，答案塌成一个数字，把要求的分类明细丢了。
+#   2) analysis_cone_gate_type_count / analysis_gate_successors /
+#      analysis_path_exists_avoiding 的 schema 里根本没有 answer_style 字段，
+#      LLM 通过 function calling 物理上无法产出它；目前只靠渲染层对
+#      请求原文的精确正则兜底，换个说法（隐藏集）就会失效。
+#
+# 因此这里按「提问措辞」确定性地推断答案形态，放在解析链最后一步：
+#   不额外调用 LLM（零延迟、零成本）、不依赖 schema、且任何校验器都改不掉它。
+# 判据取语义线索（how many / broken down by / every path …）而非整句正则，
+# 以便在换述后的隐藏集上仍然成立。
+_GATE_WORD = r"(AND|OR|NOT|NAND|NOR|XOR|XNOR|BUF|DFF)"
+_RE_ASK_COUNT = re.compile(r"\b(how many|number of|count of|how much)\b", re.I)
+_RE_ASK_BREAKDOWN = re.compile(
+    r"(broken\s+down|break\s+it\s+down|breakdown|by\s+gate\s+type|"
+    r"per\s+gate\s+type|each\s+gate\s+type|for\s+each\s+type|by\s+type)", re.I)
+_RE_ASK_TYPE = re.compile(r"\b(?:how many|number of|count of)\s+" + _GATE_WORD + r"\b", re.I)
+_RE_EVERY_PATH = re.compile(
+    r"\b(?:every|all|each)\s+paths?\b[\s\S]{0,60}?\b(?:pass|passes|go|goes|run|runs)\b"
+    r"[\s\S]{0,20}?\bthrough\b", re.I)
+_RE_ASK_LIST = re.compile(r"\b(list|enumerate|report every|name every|which gates|report all)\b", re.I)
+
+# 值为 None 表示「保持不变」；值为 "" 表示「必须删掉 answer_style」（要完整明细）
+def _infer_answer_style(tool: str, request: str) -> Optional[str]:
+    text = request or ""
+    type_match = _RE_ASK_TYPE.search(text)
+    wants_breakdown = bool(_RE_ASK_BREAKDOWN.search(text))
+
+    if tool == "analysis_count_gates":
+        # 「只问某一类门」优先级最高
+        if type_match and not wants_breakdown:
+            return type_match.group(1).lower() + "_only"
+        # 明确要分类明细 -> 绝不能塌成单个总数（这是公开集 31 条的丢分点）
+        if wants_breakdown:
+            return ""
+        return None
+
+    if tool == "analysis_cone_gate_type_count":
+        # schema 无此字段，LLM 无法产出；渲染层也没有原文兜底 -> 必须在这里补
+        if type_match:
+            return type_match.group(1).lower() + "_only"
+        return None
+
+    if tool == "analysis_gate_successors":
+        # 问「多少个」要计数，问「哪些」要清单
+        if _RE_ASK_COUNT.search(text) and not _RE_ASK_LIST.search(text):
+            return "count_only"
+        return None
+
+    if tool in ("analysis_path_exists_avoiding", "analysis_path_exists"):
+        # 「是否每条路径都经过 X」与「是否存在避开 X 的路径」答案正好相反
+        if _RE_EVERY_PATH.search(text):
+            return "all_paths_through"
+        return None
+
+    return None
+
+
+def _apply_answer_shape(request: str, call: "ToolCall") -> "ToolCall":
+    """按提问措辞回填/纠正 answer_style。解析链的最后一步，谁也覆盖不了它。"""
+    inferred = _infer_answer_style(call.tool, request)
+    if inferred is None:
+        return call
+    args = dict(call.arguments)
+    if inferred == "":
+        if "answer_style" in args:
+            args.pop("answer_style", None)
+        else:
+            return call
+    else:
+        if args.get("answer_style") == inferred:
+            return call
+        args["answer_style"] = inferred
+    return ToolCall(tool=call.tool, arguments=args, source=call.source)
+
+
+def _call_validation_llm(
+    parser: "RequestParser",
+    system: str,
+    user: str,
+) -> Dict[str, Any]:
+    """Thin wrapper: call the LLM in plain JSON mode (no tools)."""
+    if parser.config.provider == "anthropic":
+        return parser._call_anthropic(system, user)
+    else:
+        return parser._call_openai(system, user)
+
+
 class RequestParser:
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -856,6 +1213,27 @@ class RequestParser:
         # 最近一次「LLM 失败 -> 降级 regex」的原因；正常为 None。仅用于诊断/报表，
         # 不参与任何路由判断。
         self.last_fallback_error: Optional[str] = None
+        # 校验日志输出句柄（惰性打开）
+        self._vlog_handle: Optional[Any] = None
+
+    def _vlog(self, msg: str) -> None:
+        """Write *msg* to the validation log file (if configured), else stderr."""
+        if not self.config.verbose_validation:
+            return
+        if self.config.validation_log_file:
+            if self._vlog_handle is None:
+                path = Path(self.config.validation_log_file)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._vlog_handle = path.open("a", encoding="utf-8")
+            self._vlog_handle.write(msg + "\n")
+            self._vlog_handle.flush()
+        else:
+            print(msg, file=sys.stderr)
+
+    def _vlog_close(self) -> None:
+        if self._vlog_handle is not None:
+            self._vlog_handle.close()
+            self._vlog_handle = None
 
     def parse(self, request: str) -> ToolCall:
         self.last_fallback_error = None
@@ -899,6 +1277,239 @@ class RequestParser:
         if missing:
             raise ValueError(f"missing arguments for {call.tool}: {missing}")
 
+    # ── Iterative tool-name validation ──────────────────────────────────
+
+    def _run_dual_review(
+        self, prompts: List[Tuple[str, str]], fallback_template: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Call *prompts* (each is (system, user)) in parallel via a thread pool.
+        Each prompt returns a dict; on any failure *fallback_template* is used so
+        a single crashed reviewer never blocks the other."""
+        results: List[Optional[Dict[str, Any]]] = [None, None]
+
+        def _call_one(idx: int, sys_p: str, usr_p: str) -> None:
+            try:
+                res = _call_validation_llm(self, sys_p, usr_p)
+                if isinstance(res, dict) and "valid" in res:
+                    results[idx] = res
+            except Exception:
+                pass
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(_call_one, i, sys_p, usr_p)
+                for i, (sys_p, usr_p) in enumerate(prompts)
+            ]
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+
+        return [r if r is not None else dict(fallback_template) for r in results]
+
+    def _closest_tool_name(self, name: str) -> str:
+        """Return the closest ALLOWED_TOOLS match by simple edit-distance heuristic
+        (prefix / substring / levenshtein-ish).  Returns the original *name* if no
+        reasonable match is found (caller should still decide what to do)."""
+        if name in ALLOWED_TOOLS:
+            return name
+        lower = name.lower().strip()
+        # exact match after lower
+        for t in ALLOWED_TOOLS:
+            if t.lower() == lower:
+                return t
+        # prefix match (LLM sometimes adds suffixes like "_v2")
+        for t in sorted(ALLOWED_TOOLS, key=lambda x: -len(x)):
+            if lower.startswith(t.lower()):
+                return t
+        # substring match
+        for t in sorted(ALLOWED_TOOLS, key=lambda x: -len(x)):
+            if t.lower() in lower or lower in t.lower():
+                return t
+        return name
+
+    def _validate_tool_name_loop(self, request: str, tool: str, args: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Iteratively validate/correct the tool name (max *tool_name_validation_retries*
+        rounds).  Returns (final_tool, args)."""
+        max_rounds = max(1, self.config.tool_name_validation_retries)
+        current_tool = tool
+        best: List[Tuple[str, int]] = []  # (tool_name, valid_votes)
+
+        self._vlog(f"\n[validate-tool-name] start  tool=\"{tool}\"  request=\"{request[:80]}...\"")
+
+        _deadline = getattr(self, "_validation_deadline", None)
+        for round_idx in range(max_rounds):
+            if _deadline and round_idx > 0 and time.monotonic() > _deadline:
+                self._vlog(f"[validate-tool-name] validation budget exhausted -> stop at round {round_idx}")
+                break
+            self._vlog(f"[validate-tool-name] round {round_idx+1}/{max_rounds}  current_tool=\"{current_tool}\"")
+
+            # 0) rule-based pre-check: unknown tool → heuristic correction
+            if current_tool not in ALLOWED_TOOLS:
+                corrected = self._closest_tool_name(current_tool)
+                self._vlog(f"[validate-tool-name] rule-check: \"{current_tool}\" not in ALLOWED_TOOLS → heuristic → \"{corrected}\"")
+                if corrected in ALLOWED_TOOLS and corrected != current_tool:
+                    current_tool = corrected
+                else:
+                    pass
+
+            # 1) build two prompts
+            sys_a, usr_a = _build_tool_name_validation_prompt_a(
+                request, current_tool, self.tool_contract
+            )
+            sys_b, usr_b = _build_tool_name_validation_prompt_b(request, current_tool)
+
+            # 2) call both reviewers in parallel
+            results: List[Dict[str, Any]] = self._run_dual_review(
+                [(sys_a, usr_a), (sys_b, usr_b)],
+                {"valid": True, "tool": current_tool, "reason": "error → assume ok"},
+            )
+
+            # 3) tally votes
+            votes = sum(1 for r in results if r.get("valid") is True)
+            best.append((current_tool, votes))
+
+            for i, r in enumerate(results):
+                label = "A(contract)" if i == 0 else "B(routing)"
+                v = "PASS" if r.get("valid") is True else "FAIL"
+                self._vlog(f"[validate-tool-name]   reviewer {label}: {v}  tool=\"{r.get('tool','')}\"  reason=\"{r.get('reason','')[:80]}\"")
+            self._vlog(f"[validate-tool-name]   votes={votes}/2")
+
+            # 4) if both agree it's valid → done
+            if votes == 2:
+                self._vlog(f"[validate-tool-name] DONE  tool=\"{current_tool}\"  (both passed)")
+                return current_tool, args
+
+            # 5) pick a corrected name from the dissenting reviewer(s)
+            corrected_names = [
+                str(r.get("tool", "")).strip()
+                for r in results
+                if r.get("valid") is not True and r.get("tool", "")
+            ]
+            if corrected_names:
+                for cn in corrected_names:
+                    if cn in ALLOWED_TOOLS and cn != current_tool:
+                        self._vlog(f"[validate-tool-name]   corrected: \"{current_tool}\" → \"{cn}\"")
+                        current_tool = cn
+                        break
+                else:
+                    fallback = self._closest_tool_name(corrected_names[0])
+                    if fallback in ALLOWED_TOOLS:
+                        self._vlog(f"[validate-tool-name]   fallback: \"{current_tool}\" → \"{fallback}\"")
+                        current_tool = fallback
+
+        # --- out of rounds: pick the best by vote count, then by frequency ---
+        best.sort(key=lambda x: (-x[1], -sum(1 for t, _ in best if t == x[0])))
+        final_tool = best[0][0] if best else tool
+        self._vlog(f"[validate-tool-name] EXHAUSTED  best=\"{final_tool}\" (history: {best})")
+        return final_tool, args
+
+    # ── Iterative tool-args validation ───────────────────────────────────
+
+    def _validate_tool_args_loop(
+        self, request: str, tool: str, args: Dict[str, Any], tool_changed: bool
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Iteratively validate/correct tool arguments (max *tool_args_validation_retries*
+        rounds).  Returns (tool, final_args)."""
+        max_rounds = max(1, self.config.tool_args_validation_retries)
+        current_args = dict(args)
+        best: List[Tuple[Dict[str, Any], int]] = []  # (args, valid_votes)
+
+        self._vlog(f"\n[validate-tool-args] start  tool=\"{tool}\"  tool_changed={tool_changed}  args={json.dumps(current_args, ensure_ascii=False)}")
+
+        _deadline = getattr(self, "_validation_deadline", None)
+        for round_idx in range(max_rounds):
+            if _deadline and round_idx > 0 and time.monotonic() > _deadline:
+                self._vlog(f"[validate-tool-args] validation budget exhausted -> stop at round {round_idx}")
+                break
+            self._vlog(f"[validate-tool-args] round {round_idx+1}/{max_rounds}")
+
+            # 0) if tool changed during name-validation, ask LLM to fill fresh args
+            if tool_changed and round_idx == 0:
+                self._vlog(f"[validate-tool-args] tool was changed → filling fresh args for \"{tool}\"")
+                fresh = self._fill_args_for_tool(request, tool)
+                if fresh:
+                    current_args = fresh
+                    self._vlog(f"[validate-tool-args] filled args: {json.dumps(current_args, ensure_ascii=False)}")
+
+            # 1) build two prompts
+            sys_a, usr_a = _build_tool_args_validation_prompt_a(
+                request, tool, current_args, self.tool_contract
+            )
+            sys_b, usr_b = _build_tool_args_validation_prompt_b(
+                request, tool, current_args, self.tool_contract
+            )
+
+            # 2) call both reviewers in parallel
+            results: List[Dict[str, Any]] = self._run_dual_review(
+                [(sys_a, usr_a), (sys_b, usr_b)],
+                {"valid": True, "arguments": current_args, "reason": "error → assume ok"},
+            )
+
+            # 3) tally votes
+            votes = sum(1 for r in results if r.get("valid") is True)
+            best.append((current_args, votes))
+
+            for i, r in enumerate(results):
+                label = "A(schema)" if i == 0 else "B(semantic)"
+                v = "PASS" if r.get("valid") is True else "FAIL"
+                self._vlog(f"[validate-tool-args]   reviewer {label}: {v}  reason=\"{r.get('reason','')[:80]}\"")
+            self._vlog(f"[validate-tool-args]   votes={votes}/2")
+
+            # 4) if both agree → done
+            if votes == 2:
+                self._vlog(f"[validate-tool-args] DONE  args={json.dumps(current_args, ensure_ascii=False)}  (both passed)")
+                return tool, current_args
+
+            # 5) pick corrected args from the dissenting reviewer(s)
+            for r in results:
+                if r.get("valid") is not True and isinstance(r.get("arguments"), dict):
+                    corrected = r["arguments"]
+                    if corrected and corrected != current_args:
+                        self._vlog(f"[validate-tool-args]   corrected args: {json.dumps(corrected, ensure_ascii=False)}")
+                        current_args = corrected
+                        break
+
+        # --- out of rounds: pick the best by vote count ---
+        best.sort(key=lambda x: -x[1])
+        final_args = best[0][0] if best else args
+        self._vlog(f"[validate-tool-args] EXHAUSTED  best_args={json.dumps(final_args, ensure_ascii=False)} (history votes: {[v for _,v in best]})")
+        return tool, final_args
+
+    def _fill_args_for_tool(self, request: str, tool: str) -> Optional[Dict[str, Any]]:
+        """One-shot LLM call: return a fresh set of arguments for *tool* based
+        solely on *request* (used when the tool name was corrected)."""
+        schema = _tool_schema_for_validation(self.tool_contract, tool)
+        params_schema = schema.get("parameters", {})
+        system = (
+            "You are a precise EDA argument extractor. "
+            "Given a user request and a tool name with its parameter schema, "
+            "extract the correct argument values from the request.\n\n"
+            "Return ONLY a JSON object:\n"
+            '  {"arguments": {<filled arguments>}}\n'
+            "- Include every REQUIRED parameter.\n"
+            "- Extract signal/gate/net names exactly as written in the request.\n"
+            "- Constants must use Verilog format \"1'b0\"/\"1'b1\".\n"
+            "- Do NOT invent values not present in the request.\n"
+        )
+        user = json.dumps(
+            {
+                "request": request,
+                "tool": tool,
+                "parameter_schema": params_schema,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        try:
+            res = _call_validation_llm(self, system, user)
+            if isinstance(res, dict) and isinstance(res.get("arguments"), dict):
+                return res["arguments"]
+        except Exception:
+            pass
+        return None
+
     def _parse_with_llm(self, request: str) -> ToolCall:
         if not self.config.api_key:
             raise RuntimeError("LLM API key is not configured")
@@ -921,11 +1532,25 @@ class RequestParser:
         args = payload.get("arguments", {})
         if not isinstance(args, dict):
             raise ValueError("LLM arguments must be an object")
+
+        # ── Iterative tool-call validation ──────────────────────────
+        if self.config.enable_tool_validation:
+            # 两个校验循环共用一个墙钟截止时间，避免各自计时导致总耗时翻倍，
+            # 顶穿官方单条 60s/300s 时限。
+            _vb = float(getattr(self.config, "validation_budget_sec", 0.0) or 0.0)
+            self._validation_deadline = (time.monotonic() + _vb) if _vb > 0 else None
+            original_tool = tool
+            tool, args = self._validate_tool_name_loop(request, tool, args)
+            tool_changed = (tool != original_tool)
+            tool, args = self._validate_tool_args_loop(request, tool, args, tool_changed)
+
         call = ToolCall(tool=tool, arguments=args, source="llm")
         if self.config.llm_review:
             call = self._review_llm_call(request, call)
         call = self._repair_llm_call(request, call)
-        return self._normalize_llm_call(request, call)
+        call = self._normalize_llm_call(request, call)
+        # 最后一步：按提问措辞确定性回填答案形态（见 _apply_answer_shape）
+        return _apply_answer_shape(request, call)
 
     def _review_llm_call(self, request: str, call: ToolCall) -> ToolCall:
         user = json.dumps(
