@@ -1167,6 +1167,66 @@ def _infer_answer_style(tool: str, request: str) -> Optional[str]:
     return None
 
 
+# ── 优化作用域（scope/target）确定性消歧 ──────────────────────────
+# 背景：depth 优化题里，「cone of X」可能是两种完全不同的东西：
+#   (a) 优化作用域    —— "The cost function is the depth of the cone of n8"
+#   (b) 门库约束范围  —— "...ensuring the cone of n15 contains only AND, OR, NOT"
+# 判别点只有一个：**cost function 那句话指的是 design 还是 cone**。
+#
+# 实测 LLM 在 test25/26/27 上把 (b) 误当成 (a)：这三题的 cost 明写
+# "the maximum logic depth of the final design"，但句子别处提到 cone of X（门库约束），
+# LLM 就填了 scope=cone + target。后果很隐蔽——报出来的 cost 变成「锥的深度」而不是
+# 「设计的深度」，数字看着更小，实际整设计根本没优化（test27 的 3->3 kept_original
+# 就是这个 bug 露出来的样子）。
+#
+# 这里只读 cost function 从句来定 scope，因此不会被句子别处的 cone 干扰。
+_RE_COST_CLAUSE = re.compile(
+    r"cost(?:\s+function)?\s*(?:\bis\b|:|=)\s*([^;.]*)", re.I)
+_RE_COST_CONE = re.compile(r"\bcone\s+of\s+([A-Za-z_][\w\[\]\.]*)", re.I)
+_RE_COST_DESIGN = re.compile(r"\b(final\s+design|the\s+design|whole\s+netlist|entire\s+design|overall\s+design)\b", re.I)
+
+_SCOPE_TOOLS = ("optimization_reduce_depth",)
+
+def _infer_opt_scope(tool: str, request: str) -> Optional[Tuple[str, Optional[str]]]:
+    """按 cost function 从句推断 (scope, target)；无法判定时返回 None（不动）。"""
+    if tool not in _SCOPE_TOOLS:
+        return None
+    m = _RE_COST_CLAUSE.search(request or "")
+    if not m:
+        return None                      # 没有明确的 cost 从句 -> 保守不动
+    clause = m.group(1)
+    cone = _RE_COST_CONE.search(clause)
+    if cone:
+        return ("cone", cone.group(1))   # cost 就是某个锥的深度 -> 锥作用域
+    if _RE_COST_DESIGN.search(clause):
+        return ("design", None)          # cost 是整设计深度 -> 设计作用域，target 必须清掉
+    return None
+
+
+def _apply_opt_scope(request: str, call: "ToolCall") -> "ToolCall":
+    """把优化作用域纠正到 cost function 所指的对象上。解析链末端执行。"""
+    inferred = _infer_opt_scope(call.tool, request)
+    if inferred is None:
+        return call
+    scope, target = inferred
+    args = dict(call.arguments)
+    changed = False
+    if args.get("scope") != scope:
+        args["scope"] = scope
+        changed = True
+    if scope == "design":
+        # 设计级优化不能带 target，否则后端会当成锥优化
+        if args.pop("target", None) is not None:
+            changed = True
+    else:
+        if target and args.get("target") != target:
+            args["target"] = target
+            changed = True
+    if not changed:
+        return call
+    return ToolCall(tool=call.tool, arguments=args, source=call.source)
+
+
 def _apply_answer_shape(request: str, call: "ToolCall") -> "ToolCall":
     """按提问措辞回填/纠正 answer_style。解析链的最后一步，谁也覆盖不了它。"""
     inferred = _infer_answer_style(call.tool, request)
@@ -1549,8 +1609,9 @@ class RequestParser:
             call = self._review_llm_call(request, call)
         call = self._repair_llm_call(request, call)
         call = self._normalize_llm_call(request, call)
-        # 最后一步：按提问措辞确定性回填答案形态（见 _apply_answer_shape）
-        return _apply_answer_shape(request, call)
+        # 最后两步：确定性回填答案形态 + 纠正优化作用域（见对应函数注释）
+        call = _apply_answer_shape(request, call)
+        return _apply_opt_scope(request, call)
 
     def _review_llm_call(self, request: str, call: ToolCall) -> ToolCall:
         user = json.dumps(
